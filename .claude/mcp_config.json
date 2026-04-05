@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "google-search": {
+      "command": "python",
+      "args": ["-m", "src.mcp.google_search_mcp"],
+      "cwd": "/Users/maorworko/Desktop/project/MarketMind-Pro",
+      "env": {
+        "PYTHONPATH": "/Users/maorworko/Desktop/project/MarketMind-Pro"
+      },
+      "description": "Google Search MCP for real-time financial news and market context"
+    },
+    "sql-database": {
+      "command": "python",
+      "args": ["-m", "src.mcp.sql_mcp_server"],
+      "cwd": "/Users/maorworko/Desktop/project/MarketMind-Pro",
+      "env": {
+        "PYTHONPATH": "/Users/maorworko/Desktop/project/MarketMind-Pro"
+      },
+      "description": "SQL MCP for AI-accessible PostgreSQL market data queries"
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '[Hook] Bash command incoming — verify no destructive ops'",
+            "blocking": false
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd /Users/maorworko/Desktop/project/MarketMind-Pro && ruff check --quiet \"$CLAUDE_TOOL_OUTPUT_FILE\" 2>/dev/null || true",
+            "blocking": false
+          }
+        ]
+      }
+    ]
+  }
+}

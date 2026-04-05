@@ -1,0 +1,163 @@
+version: "3.9"
+
+# ══════════════════════════════════════════════════════════════════════
+#  MarketMind-Pro — Docker Compose
+#  Target: Apple Silicon M4 (arm64) — all images use linux/arm64
+# ══════════════════════════════════════════════════════════════════════
+
+services:
+
+  # ── PostgreSQL ────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    platform: linux/arm64
+    container_name: marketmind-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: marketmind
+      POSTGRES_USER: marketmind
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-marketmind_dev_password}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U marketmind -d marketmind"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - marketmind_net
+
+  # ── Redis ─────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    platform: linux/arm64
+    container_name: marketmind-redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - marketmind_net
+
+  # ── MarketMind App ────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+      platforms:
+        - linux/arm64
+    container_name: marketmind-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://marketmind:${POSTGRES_PASSWORD:-marketmind_dev_password}@postgres:5432/marketmind
+      DATABASE_URL_SYNC: postgresql+psycopg2://marketmind:${POSTGRES_PASSWORD:-marketmind_dev_password}@postgres:5432/marketmind
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - app_data:/app/data
+    networks:
+      - marketmind_net
+    healthcheck:
+      test: ["CMD", "python", "-c", "from src.utils.config import settings; print('OK')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── Google Search MCP Server ──────────────────────────────────────
+  mcp-search:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: marketmind-mcp-search
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://marketmind:${POSTGRES_PASSWORD:-marketmind_dev_password}@postgres:5432/marketmind
+      REDIS_URL: redis://redis:6379/0
+    command: ["python", "-m", "src.mcp.google_search_mcp"]
+    ports:
+      - "8001:8001"
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - marketmind_net
+
+  # ── SQL MCP Server ────────────────────────────────────────────────
+  mcp-sql:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: marketmind-mcp-sql
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://marketmind:${POSTGRES_PASSWORD:-marketmind_dev_password}@postgres:5432/marketmind
+    command: ["python", "-m", "src.mcp.sql_mcp_server"]
+    ports:
+      - "8002:8002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - marketmind_net
+
+  # ── Alembic Migrations (runs once on startup) ─────────────────────
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: marketmind-migrate
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL_SYNC: postgresql+psycopg2://marketmind:${POSTGRES_PASSWORD:-marketmind_dev_password}@postgres:5432/marketmind
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - marketmind_net
+    restart: "no"
+
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  app_data:
+    driver: local
+
+
+networks:
+  marketmind_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

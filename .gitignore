@@ -1,0 +1,58 @@
+# ── Secrets (NEVER COMMIT) ───────────────────────────────────────────
+.env
+*.pem
+*.key
+secrets/
+
+# ── Python ───────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Testing & Coverage ───────────────────────────────────────────────
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+
+# ── Type Checkers ────────────────────────────────────────────────────
+.mypy_cache/
+.pyright/
+
+# ── Ruff ─────────────────────────────────────────────────────────────
+.ruff_cache/
+
+# ── Data (raw market data is large and frequently changing) ──────────
+data/raw/
+data/processed/
+data/cache/
+!data/.gitkeep
+
+# ── IDE ───────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Docker ────────────────────────────────────────────────────────────
+docker-compose.override.yml
+
+# ── Logs ──────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Jupyter ───────────────────────────────────────────────────────────
+.ipynb_checkpoints/
