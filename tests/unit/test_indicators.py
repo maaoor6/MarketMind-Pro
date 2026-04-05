@@ -76,7 +76,8 @@ def test_ema_basic(simple_prices):
 @pytest.mark.unit
 def test_ema_flat(flat_prices):
     result = ema(flat_prices, 20)
-    assert (result.dropna() == pytest.approx(100.0, rel=1e-6)).all()
+    valid = result.dropna()
+    assert all(abs(v - 100.0) < 1e-6 for v in valid)
 
 
 @pytest.mark.unit

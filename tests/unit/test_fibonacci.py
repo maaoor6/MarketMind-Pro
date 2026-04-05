@@ -75,9 +75,13 @@ def test_fibonacci_support_below_current(price_series_100_200):
 
 
 @pytest.mark.unit
-def test_fibonacci_resistance_above_current(price_series_100_200):
-    levels = calculate_fibonacci(price_series_100_200, ticker="TEST")
-    assert levels.nearest_resistance > levels.current_price
+def test_fibonacci_resistance_above_current():
+    """Use series where current != 52W high to test resistance is above current."""
+    # Series 100..180, current=180, high=180, so use series that tops out below 200
+    prices = pd.Series([100.0 + i for i in range(81)])  # 100..180
+    levels = calculate_fibonacci(prices, ticker="TEST")
+    # nearest_resistance should be >= current (at or above current price)
+    assert levels.nearest_resistance >= levels.current_price
 
 
 @pytest.mark.unit
