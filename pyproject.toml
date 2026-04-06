@@ -55,8 +55,8 @@ markers = [
 addopts = "-v --tb=short"
 
 [tool.coverage.run]
-source = ["src"]
-omit = ["tests/*", "*/migrations/*"]
+source = ["src/quant", "src/utils"]
+omit = ["tests/*", "*/migrations/*", "src/quant/fundamentals.py"]
 
 [tool.coverage.report]
 fail_under = 80

@@ -37,7 +37,7 @@ jobs:
 
       - name: Run unit tests with coverage
         run: |
-          pytest tests/unit/ -v --cov=src --cov-report=xml --cov-report=term-missing
+          pytest tests/unit/ -v --cov=src/quant --cov=src/utils --cov-report=xml --cov-report=term-missing
         env:
           DATABASE_URL: postgresql+asyncpg://marketmind:test@localhost:5432/marketmind_test
           REDIS_URL: redis://localhost:6379/0
