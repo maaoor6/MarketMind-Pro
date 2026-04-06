@@ -214,3 +214,35 @@ def test_all_moving_averages_values_finite():
         assert np.isfinite(
             float(series.dropna().iloc[-1])
         ), f"{name} has non-finite last value"
+
+
+# ── SMA 150 ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_sma_150_nan_before_150_bars():
+    """SMA_150 must produce NaN for the first 149 values."""
+    prices = pd.Series(range(1, 201), dtype=float)
+    result = sma(prices, 150)
+    assert result.isna().sum() == 149
+
+
+@pytest.mark.unit
+def test_sma_150_known_value():
+    """SMA_150 of [1..200] at bar 150 (index 149) == mean(1..150) == 75.5."""
+    prices = pd.Series(range(1, 201), dtype=float)
+    result = sma(prices, 150)
+    assert result.iloc[149] == pytest.approx(75.5)
+
+
+@pytest.mark.unit
+def test_sma_150_in_all_moving_averages():
+    """all_moving_averages must include SMA_150 and EMA_150 with finite values."""
+    prices = pd.Series(range(1, 251), dtype=float)
+    result = all_moving_averages(prices)
+    assert "SMA_150" in result
+    assert "EMA_150" in result
+    sma_150_last = float(result["SMA_150"].dropna().iloc[-1])
+    ema_150_last = float(result["EMA_150"].dropna().iloc[-1])
+    assert sma_150_last > 0
+    assert ema_150_last > 0

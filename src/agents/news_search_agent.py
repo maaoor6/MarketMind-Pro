@@ -57,6 +57,7 @@ class SentimentReport:
     headlines_en: list[str] = field(default_factory=list)
     summary_he: str = ""
     summary_en: str = ""
+    recent_headlines: list[dict] = field(default_factory=list)
     emoji: str = "⚪"
 
     def __post_init__(self) -> None:
@@ -240,6 +241,20 @@ class NewsSearchAgent:
             f"{neu_count} ניטרלי מתוך {len(unique_results)} כתבות."
         )
 
+        # Top 3 recent headlines with source info for display
+        top3 = [
+            {
+                "title": r.get("title", ""),
+                "snippet": r.get("snippet", "")[:120],
+                "source": (
+                    r.get("url", "").split("/")[2]
+                    if r.get("url", "").count("/") >= 2
+                    else r.get("url", "")
+                ),
+            }
+            for r in unique_results[:3]
+        ]
+
         report = SentimentReport(
             ticker=ticker,
             timestamp=now_utc().isoformat(),
@@ -250,6 +265,7 @@ class NewsSearchAgent:
             headlines_en=headlines_en[:5],
             summary_he=summary_he,
             summary_en=summary_en,
+            recent_headlines=top3,
         )
 
         # Cache result
@@ -265,6 +281,7 @@ class NewsSearchAgent:
                 "headlines_en": report.headlines_en,
                 "summary_he": report.summary_he,
                 "summary_en": report.summary_en,
+                "recent_headlines": report.recent_headlines,
                 "emoji": report.emoji,
             },
         )

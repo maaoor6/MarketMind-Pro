@@ -49,7 +49,16 @@ period = st.sidebar.selectbox(
 
 show_ma = st.sidebar.multiselect(
     "Moving Averages",
-    options=["SMA_20", "EMA_20", "SMA_50", "EMA_50", "SMA_200", "EMA_200"],
+    options=[
+        "SMA_20",
+        "EMA_20",
+        "SMA_50",
+        "EMA_50",
+        "SMA_150",
+        "EMA_150",
+        "SMA_200",
+        "EMA_200",
+    ],
     default=["SMA_50", "SMA_200"],
 )
 
@@ -68,6 +77,8 @@ MA_COLORS = {
     "EMA_20": "#ffd54f",
     "SMA_50": "#29b6f6",
     "EMA_50": "#4fc3f7",
+    "SMA_150": "#ff7043",
+    "EMA_150": "#ff8a65",
     "SMA_200": "#ef5350",
     "EMA_200": "#e57373",
 }

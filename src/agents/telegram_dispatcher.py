@@ -204,15 +204,18 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         lines = [
             f"📊 <b>ניתוח {html.escape(ticker)}</b>",
             "━━━━━━━━━━━━━━━━━━━",
+        ]
+
+        # ── Company header (TOP) ──
+        if isinstance(profile_result, CompanyProfile):
+            lines.append(format_profile_hebrew(profile_result))
+            lines.append("")
+
+        lines += [
             f"💰 <b>מחיר נוכחי:</b> <code>{sym}{price:,.2f}</code>",
             f"🕐 <b>עדכון:</b> {datetime.utcnow().strftime('%d/%m/%Y %H:%M')} UTC",
             "",
         ]
-
-        # ── Fundamentals section ──
-        if isinstance(profile_result, CompanyProfile):
-            lines.append(format_profile_hebrew(profile_result))
-            lines.append("")
 
         # ── Technical indicators ──
         rsi_emoji, rsi_he = _rsi_hebrew(rsi_signal)
@@ -228,7 +231,7 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # ── Moving averages ──
         if mas:
             lines.append("📏 <b>ממוצעים נעים:</b>")
-            for ma_key in ["SMA_20", "SMA_50", "SMA_200"]:
+            for ma_key in ["SMA_20", "SMA_50", "SMA_150", "SMA_200"]:
                 val = mas.get(ma_key)
                 if val:
                     relation = "↑ מעל" if price > val else "↓ מתחת"
@@ -300,10 +303,20 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             ]
             if sentiment.summary_he:
                 lines.append(f"  <i>{html.escape(sentiment.summary_he)}</i>")
-            if sentiment.headlines_he:
+            if sentiment.recent_headlines:
+                for item in sentiment.recent_headlines[:3]:
+                    src = item.get("source", "")
+                    title = item.get("title", "")
+                    snippet = item.get("snippet", "")
+                    lines.append(f"    • <b>{html.escape(title)}</b>")
+                    if snippet:
+                        lines.append(f"      <i>{html.escape(snippet)}</i>")
+                    if src:
+                        lines.append(f"      <code>{html.escape(src)}</code>")
+            elif sentiment.headlines_he:
                 for h_line in sentiment.headlines_he[:3]:
                     lines.append(f"    • {html.escape(h_line)}")
-            if sentiment.headlines_en:
+            elif sentiment.headlines_en:
                 for h_line in sentiment.headlines_en[:2]:
                     lines.append(f"    • {html.escape(h_line)}")
             lines.append("")
