@@ -131,7 +131,12 @@ async def _search_web(
     cx = settings.google_search_engine_id
 
     if not api_key or not cx:
-        return [TextContent(type="text", text=json.dumps({"error": "Google API credentials not configured"}))]
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps({"error": "Google API credentials not configured"}),
+            )
+        ]
 
     full_query = f"site:{site_filter} {query}" if site_filter else query
 
@@ -158,7 +163,12 @@ async def _search_web(
                 }
                 for item in items
             ]
-            return [TextContent(type="text", text=json.dumps({"results": results, "query": full_query}))]
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps({"results": results, "query": full_query}),
+                )
+            ]
         except Exception as exc:
             logger.error("google_search_mcp_failed", error=str(exc))
             return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
@@ -170,7 +180,12 @@ async def _scrape_page(url: str) -> list[TextContent]:
     allowed_domains = set(FINANCIAL_SITES) | {"sec.gov", "tase.co.il"}
     domain = url.split("/")[2] if url.count("/") >= 2 else ""
     if not any(allowed in domain for allowed in allowed_domains):
-        return [TextContent(type="text", text=json.dumps({"error": f"Domain {domain} not in allowed list"}))]
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps({"error": f"Domain {domain} not in allowed list"}),
+            )
+        ]
 
     async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
         try:
@@ -179,12 +194,16 @@ async def _scrape_page(url: str) -> list[TextContent]:
             response.raise_for_status()
             # Return raw text (no HTML parsing — keep dependency minimal)
             text = response.text[:5000]  # Limit to 5k chars
-            return [TextContent(type="text", text=json.dumps({"url": url, "content": text}))]
+            return [
+                TextContent(type="text", text=json.dumps({"url": url, "content": text}))
+            ]
         except Exception as exc:
             return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
 
 
-async def _search_financial_news(ticker: str, language: str = "both") -> list[TextContent]:
+async def _search_financial_news(
+    ticker: str, language: str = "both"
+) -> list[TextContent]:
     """Multi-source ticker news search."""
     queries = []
     if language in ("en", "both"):
@@ -210,7 +229,11 @@ async def _search_financial_news(ticker: str, language: str = "both") -> list[Te
             seen.add(url)
             unique.append(r)
 
-    return [TextContent(type="text", text=json.dumps({"ticker": ticker, "results": unique[:15]}))]
+    return [
+        TextContent(
+            type="text", text=json.dumps({"ticker": ticker, "results": unique[:15]})
+        )
+    ]
 
 
 async def main() -> None:
@@ -222,4 +245,5 @@ async def main() -> None:
 
 if __name__ == "__main__":
     import asyncio
+
     asyncio.run(main())

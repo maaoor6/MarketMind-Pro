@@ -5,15 +5,12 @@ from datetime import datetime
 import pytest
 import pytz
 from freezegun import freeze_time
-
 from src.utils.timezone_utils import (
     is_nyse_open,
     is_tase_open,
     market_status,
     to_tase_time,
     to_us_time,
-    TZ_US,
-    TZ_TASE,
 )
 
 
@@ -36,10 +33,17 @@ def test_nyse_closed_weekend():
 
 
 @pytest.mark.unit
-@freeze_time("2024-01-14 10:00:00", tz_offset=0)  # Sunday 10:00 UTC → 12:00 IST
-def test_tase_open_on_sunday():
-    # Sunday in Israel is a trading day; 12:00 IST is within 09:59–17:25
+@freeze_time("2024-01-15 10:00:00", tz_offset=0)  # Monday 10:00 UTC → 12:00 IST
+def test_tase_open_on_monday():
+    # Monday in Israel is a trading day; 12:00 IST is within 10:00–17:25
     assert is_tase_open() is True
+
+
+@pytest.mark.unit
+@freeze_time("2024-01-14 10:00:00", tz_offset=0)  # Sunday 10:00 UTC → 12:00 IST
+def test_tase_closed_on_sunday():
+    # TASE trades Mon–Fri only; Sunday is closed
+    assert is_tase_open() is False
 
 
 @pytest.mark.unit

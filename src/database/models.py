@@ -7,14 +7,13 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
-    ForeignKey,
     Index,
     Numeric,
     String,
     Text,
     func,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class Base(DeclarativeBase):
@@ -25,13 +24,13 @@ class PriceHistory(Base):
     """OHLCV price history for any ticker."""
 
     __tablename__ = "price_history"
-    __table_args__ = (
-        Index("ix_price_history_ticker_ts", "ticker", "timestamp"),
-    )
+    __table_args__ = (Index("ix_price_history_ticker_ts", "ticker", "timestamp"),)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     ticker: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
-    exchange: Mapped[str] = mapped_column(String(10), nullable=False)  # NYSE, TASE, etc.
+    exchange: Mapped[str] = mapped_column(
+        String(10), nullable=False
+    )  # NYSE, TASE, etc.
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     timeframe: Mapped[str] = mapped_column(String(5), nullable=False)  # 1m, 5m, 1d
 
@@ -65,7 +64,9 @@ class DualListingGap(Base):
     usd_ils_rate: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
     price_tase_in_usd: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
     gap_pct: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
-    gap_direction: Mapped[str] = mapped_column(String(10), nullable=False)  # US_PREMIUM / TASE_PREMIUM
+    gap_direction: Mapped[str] = mapped_column(
+        String(10), nullable=False
+    )  # US_PREMIUM / TASE_PREMIUM
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -105,8 +106,12 @@ class InsiderTransaction(Base):
     ticker: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     insider_name: Mapped[str] = mapped_column(String(200), nullable=False)
     insider_title: Mapped[str] = mapped_column(String(200), nullable=True)
-    transaction_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    transaction_type: Mapped[str] = mapped_column(String(20), nullable=False)  # BUY, SELL
+    transaction_date: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    transaction_type: Mapped[str] = mapped_column(
+        String(20), nullable=False
+    )  # BUY, SELL
     shares: Mapped[int] = mapped_column(BigInteger, nullable=False)
     price_per_share: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=True)
     total_value: Mapped[Decimal] = mapped_column(Numeric(20, 2), nullable=True)
@@ -127,8 +132,12 @@ class SentimentRecord(Base):
     score: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False)  # -1.0 to 1.0
     headline_count: Mapped[int] = mapped_column(nullable=False, default=0)
     sources: Mapped[str] = mapped_column(Text, nullable=True)  # JSON array of sources
-    summary_he: Mapped[str | None] = mapped_column(Text, nullable=True)  # Hebrew summary
-    summary_en: Mapped[str | None] = mapped_column(Text, nullable=True)  # English summary
+    summary_he: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # Hebrew summary
+    summary_en: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # English summary
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

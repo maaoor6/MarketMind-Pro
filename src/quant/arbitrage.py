@@ -1,7 +1,6 @@
 """USD/ILS arbitrage detection for dual-listed stocks (TASE + NYSE/NASDAQ)."""
 
 from dataclasses import dataclass
-from decimal import Decimal
 
 import httpx
 
@@ -122,7 +121,8 @@ def format_arbitrage_message(signal: ArbitrageSignal) -> str:
     """Format arbitrage signal as a Telegram message."""
     emoji = "🟢" if signal.is_opportunity else "⚪"
     direction_label = (
-        "🇺🇸 US trades at PREMIUM" if signal.gap_direction == "US_PREMIUM"
+        "🇺🇸 US trades at PREMIUM"
+        if signal.gap_direction == "US_PREMIUM"
         else "🇮🇱 TASE trades at PREMIUM"
     )
 
@@ -132,5 +132,5 @@ def format_arbitrage_message(signal: ArbitrageSignal) -> str:
         f"TASE Price: ₪{signal.price_tase_ils:,.3f} (${signal.price_tase_in_usd:,.3f})\n"
         f"USD/ILS Rate: {signal.usd_ils_rate:.4f}\n"
         f"Gap: {signal.gap_pct:.2f}% — {direction_label}\n"
-        + (f"⚡ *OPPORTUNITY DETECTED*" if signal.is_opportunity else "")
+        + ("⚡ *OPPORTUNITY DETECTED*" if signal.is_opportunity else "")
     )

@@ -2,13 +2,13 @@
 
 from collections.abc import AsyncGenerator
 
+from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.utils.config import settings
@@ -69,6 +69,7 @@ async def check_db_connection() -> dict[str, str]:
     """Health check for the database connection."""
     try:
         from sqlalchemy import text
+
         async with AsyncSessionLocal() as session:
             await session.execute(text("SELECT 1"))
         return {"status": "ok", "detail": "PostgreSQL connected"}

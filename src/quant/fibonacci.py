@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-
 # Standard Fibonacci retracement ratios
 RETRACEMENT_LEVELS = {
     "0.0%": 0.0,
@@ -40,7 +39,9 @@ class FibonacciLevels:
 
     def price_position(self) -> str:
         """Return where current price sits relative to Fibonacci levels."""
-        pct_from_low = (self.current_price - self.low_52w) / (self.high_52w - self.low_52w)
+        pct_from_low = (self.current_price - self.low_52w) / (
+            self.high_52w - self.low_52w
+        )
         return f"{pct_from_low * 100:.1f}% from 52w low"
 
 
@@ -82,7 +83,11 @@ def calculate_fibonacci(
         extensions[label] = round(low_52w + (spread * ratio), 4)
 
     # Determine trend: look at last 20 days vs 50 days
-    trend = "UPTREND" if prices.iloc[-1] > prices.iloc[-min(20, len(prices))] else "DOWNTREND"
+    trend = (
+        "UPTREND"
+        if prices.iloc[-1] > prices.iloc[-min(20, len(prices))]
+        else "DOWNTREND"
+    )
 
     # Nearest support (largest retracement level below current price)
     support_levels = [v for v in retracements.values() if v < current_price]
@@ -114,15 +119,26 @@ def format_fibonacci_message(levels: FibonacciLevels) -> str:
         "*Retracements:*",
     ]
     for label, price in levels.retracements.items():
-        marker = "◀️" if abs(price - levels.current_price) < abs(
-            (levels.nearest_support or 0) - levels.current_price
-        ) else "  "
+        marker = (
+            "◀️"
+            if abs(price - levels.current_price)
+            < abs((levels.nearest_support or 0) - levels.current_price)
+            else "  "
+        )
         lines.append(f"  {label}: ${price:,.2f} {marker}")
 
     lines += [
         "",
         "*Key Levels:*",
-        f"  🟢 Support: ${levels.nearest_support:,.2f}" if levels.nearest_support else "",
-        f"  🔴 Resistance: ${levels.nearest_resistance:,.2f}" if levels.nearest_resistance else "",
+        (
+            f"  🟢 Support: ${levels.nearest_support:,.2f}"
+            if levels.nearest_support
+            else ""
+        ),
+        (
+            f"  🔴 Resistance: ${levels.nearest_resistance:,.2f}"
+            if levels.nearest_resistance
+            else ""
+        ),
     ]
     return "\n".join(filter(None, lines))

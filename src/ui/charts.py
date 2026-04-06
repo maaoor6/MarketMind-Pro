@@ -44,7 +44,9 @@ def candlestick_with_indicators(
         shared_xaxes=True,
         vertical_spacing=0.03,
         row_heights=[0.75, 0.25] if has_volume else [1.0],
-        subplot_titles=(f"{ticker} — OHLCV", "Volume") if has_volume else (f"{ticker}",),
+        subplot_titles=(
+            (f"{ticker} — OHLCV", "Volume") if has_volume else (f"{ticker}",)
+        ),
     )
 
     # ── Candlestick ──────────────────────────────────────────────────
@@ -96,7 +98,7 @@ def candlestick_with_indicators(
             "23.6%": "rgba(255,235,59,0.6)",
             "38.2%": "rgba(102,187,106,0.6)",
             "50.0%": "rgba(41,182,246,0.6)",
-            "61.8%": "rgba(255,112,67,0.8)",   # Golden ratio — most important
+            "61.8%": "rgba(255,112,67,0.8)",  # Golden ratio — most important
             "78.6%": "rgba(239,83,80,0.6)",
         }
         for label, price in fib_levels.retracements.items():
@@ -115,10 +117,16 @@ def candlestick_with_indicators(
     if has_volume:
         vol_colors = [
             "#00e676" if c >= o else "#ff1744"
-            for c, o in zip(df["Close"], df["Open"])
+            for c, o in zip(df["Close"], df["Open"], strict=False)
         ]
         fig.add_trace(
-            go.Bar(x=df.index, y=volume, name="Volume", marker_color=vol_colors, showlegend=False),
+            go.Bar(
+                x=df.index,
+                y=volume,
+                name="Volume",
+                marker_color=vol_colors,
+                showlegend=False,
+            ),
             row=2,
             col=1,
         )
@@ -189,7 +197,9 @@ def generate_full_chart(
     Returns dict with figure and file paths.
     """
     volume = df["Volume"] if "Volume" in df.columns else None
-    fig = candlestick_with_indicators(df, ticker, fib_levels=fib_levels, mas=mas, volume=volume)
+    fig = candlestick_with_indicators(
+        df, ticker, fib_levels=fib_levels, mas=mas, volume=volume
+    )
 
     result: dict[str, Any] = {"figure": fig}
 

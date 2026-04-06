@@ -1,4 +1,17 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(docker --version)",
+      "Bash(docker compose:*)",
+      "Bash(grep -v \"^$\")",
+      "Bash(find /Users/maorworko/Desktop/project/MarketMind-Pro/src -name \"*.py\" -exec grep -l \"Ticker\\\\|fundamental\\\\|earnings\\\\|pe_ratio\\\\|eps\\\\|insider\" {} \\\\;)",
+      "Bash(find /Users/maorworko/Desktop/project/MarketMind-Pro -name \"*.py\" -type f -exec grep -l \"github\\\\|git push\\\\|deploy\\\\|publish\" {} \\\\;)",
+      "Bash(python -c ':*)",
+      "Bash(pip3 show:*)",
+      "Bash(pip3 install:*)",
+      "Read(//Users/maorworko/Desktop/project/MarketMind-Pro/**)"
+    ]
+  },
   "hooks": {
     "PreToolUse": [
       {
@@ -6,8 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '[Hook] Bash command incoming — verify no destructive ops'",
-            "blocking": false
+            "command": "echo '[Hook] Bash command incoming — verify no destructive ops'"
           }
         ]
       }
@@ -18,8 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd /Users/maorworko/Desktop/project/MarketMind-Pro && ruff check --quiet \"$CLAUDE_TOOL_OUTPUT_FILE\" 2>/dev/null || true",
-            "blocking": false
+            "command": "cd /Users/maorworko/Desktop/project/MarketMind-Pro && ruff check --quiet \"$CLAUDE_TOOL_OUTPUT_FILE\" 2>/dev/null || true"
           }
         ]
       }

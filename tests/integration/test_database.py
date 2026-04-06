@@ -10,9 +10,8 @@ from decimal import Decimal
 import pytest
 import pytest_asyncio
 import pytz
-
-from src.database.models import Base, PriceHistory, UserAlert, DualListingGap
-from src.database.session import async_engine, AsyncSessionLocal, check_db_connection
+from src.database.models import Base, DualListingGap, PriceHistory, UserAlert
+from src.database.session import AsyncSessionLocal, async_engine, check_db_connection
 
 
 @pytest.mark.integration

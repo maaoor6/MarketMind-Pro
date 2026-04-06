@@ -1,10 +1,8 @@
 """News Search Agent — Google Search MCP-powered sentiment scanner."""
 
 import asyncio
-import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
 
 import httpx
 
@@ -26,8 +24,26 @@ POSITIVE_HE = ["עלייה", "רווח", "צמיחה", "חיובי", "שיא", "
 NEGATIVE_HE = ["ירידה", "הפסד", "משבר", "שלילי", "תשקיף", "קנס", "חקירה"]
 
 # English sentiment keywords
-POSITIVE_EN = ["surge", "gains", "profit", "growth", "record", "bullish", "beat", "upgrade"]
-NEGATIVE_EN = ["drop", "loss", "crisis", "bearish", "miss", "downgrade", "investigation", "fine"]
+POSITIVE_EN = [
+    "surge",
+    "gains",
+    "profit",
+    "growth",
+    "record",
+    "bullish",
+    "beat",
+    "upgrade",
+]
+NEGATIVE_EN = [
+    "drop",
+    "loss",
+    "crisis",
+    "bearish",
+    "miss",
+    "downgrade",
+    "investigation",
+    "fine",
+]
 
 
 @dataclass
@@ -101,7 +117,11 @@ class NewsSearchAgent:
                 response.raise_for_status()
                 items = response.json().get("items", [])
                 return [
-                    {"title": item.get("title", ""), "url": item.get("link", ""), "snippet": item.get("snippet", "")}
+                    {
+                        "title": item.get("title", ""),
+                        "url": item.get("link", ""),
+                        "snippet": item.get("snippet", ""),
+                    }
                     for item in items
                 ]
             except Exception as exc:
@@ -149,10 +169,10 @@ class NewsSearchAgent:
         queries = [
             f"{ticker} stock news today",
             f"{ticker} מניה חדשות",  # Hebrew
-            f'site:globes.co.il {ticker}',
-            f'site:bizportal.co.il {ticker}',
-            f'site:cnbc.com {ticker}',
-            f'site:reuters.com {ticker}',
+            f"site:globes.co.il {ticker}",
+            f"site:bizportal.co.il {ticker}",
+            f"site:cnbc.com {ticker}",
+            f"site:reuters.com {ticker}",
         ]
 
         all_results: list[dict] = []
@@ -194,7 +214,7 @@ class NewsSearchAgent:
             combined_text = f"{title} {snippet}"
 
             # Hebrew detection: contains Hebrew characters
-            is_hebrew = bool(re.search(r'[\u0590-\u05FF]', combined_text))
+            is_hebrew = bool(re.search(r"[\u0590-\u05FF]", combined_text))
             if is_hebrew:
                 headlines_he.append(title)
             else:
@@ -233,18 +253,21 @@ class NewsSearchAgent:
         )
 
         # Cache result
-        await cache.cache_news_sentiment(ticker, {
-            "ticker": report.ticker,
-            "timestamp": report.timestamp,
-            "score": report.score,
-            "headline_count": report.headline_count,
-            "sources": report.sources,
-            "headlines_he": report.headlines_he,
-            "headlines_en": report.headlines_en,
-            "summary_he": report.summary_he,
-            "summary_en": report.summary_en,
-            "emoji": report.emoji,
-        })
+        await cache.cache_news_sentiment(
+            ticker,
+            {
+                "ticker": report.ticker,
+                "timestamp": report.timestamp,
+                "score": report.score,
+                "headline_count": report.headline_count,
+                "sources": report.sources,
+                "headlines_he": report.headlines_he,
+                "headlines_en": report.headlines_en,
+                "summary_he": report.summary_he,
+                "summary_en": report.summary_en,
+                "emoji": report.emoji,
+            },
+        )
 
         logger.info(
             "sentiment_analysis_complete",
@@ -261,9 +284,20 @@ class NewsSearchAgent:
                 response = await client.get(f"{self._mcp_base_url}/health")
                 if response.status_code == 200:
                     return {"status": "ok", "detail": "Google Search MCP connected"}
-                return {"status": "degraded", "detail": f"MCP returned {response.status_code}"}
+                return {
+                    "status": "degraded",
+                    "detail": f"MCP returned {response.status_code}",
+                }
         except Exception:
-            fallback_ok = bool(settings.google_api_key and settings.google_search_engine_id)
+            fallback_ok = bool(
+                settings.google_api_key and settings.google_search_engine_id
+            )
             if fallback_ok:
-                return {"status": "degraded", "detail": "MCP offline, using Google API fallback"}
-            return {"status": "error", "detail": "MCP offline and no API credentials configured"}
+                return {
+                    "status": "degraded",
+                    "detail": "MCP offline, using Google API fallback",
+                }
+            return {
+                "status": "error",
+                "detail": "MCP offline and no API credentials configured",
+            }

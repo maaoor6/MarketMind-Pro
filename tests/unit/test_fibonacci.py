@@ -1,12 +1,10 @@
 """Unit tests for Fibonacci retracement calculations."""
 
-import pytest
 import pandas as pd
-
+import pytest
 from src.quant.fibonacci import (
-    calculate_fibonacci,
     RETRACEMENT_LEVELS,
-    FibonacciLevels,
+    calculate_fibonacci,
     format_fibonacci_message,
 )
 

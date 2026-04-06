@@ -1,15 +1,14 @@
 """SQL MCP Server — AI-accessible structured data queries over PostgreSQL."""
 
 import json
-from datetime import datetime
 from typing import Any
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
-from sqlalchemy import select, func, text
+from sqlalchemy import func, select
 
-from src.database.models import PriceHistory, DualListingGap, UserAlert, SentimentRecord
+from src.database.models import DualListingGap, PriceHistory, SentimentRecord, UserAlert
 from src.database.session import AsyncSessionLocal
 from src.utils.logger import get_logger
 
@@ -28,8 +27,14 @@ async def list_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {
                     "ticker": {"type": "string", "description": "Ticker symbol"},
-                    "from_date": {"type": "string", "description": "Start date ISO format (YYYY-MM-DD)"},
-                    "to_date": {"type": "string", "description": "End date ISO format (YYYY-MM-DD)"},
+                    "from_date": {
+                        "type": "string",
+                        "description": "Start date ISO format (YYYY-MM-DD)",
+                    },
+                    "to_date": {
+                        "type": "string",
+                        "description": "End date ISO format (YYYY-MM-DD)",
+                    },
                     "limit": {"type": "integer", "default": 100, "maximum": 1000},
                 },
                 "required": ["ticker"],
@@ -42,7 +47,10 @@ async def list_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {
                     "ticker_us": {"type": "string"},
-                    "min_gap_pct": {"type": "number", "description": "Minimum gap percentage filter"},
+                    "min_gap_pct": {
+                        "type": "number",
+                        "description": "Minimum gap percentage filter",
+                    },
                     "limit": {"type": "integer", "default": 50},
                 },
                 "required": ["ticker_us"],
@@ -101,7 +109,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         elif name == "get_volume_spikes":
             return await _get_volume_spikes(**arguments)
         else:
-            return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
+            return [
+                TextContent(
+                    type="text", text=json.dumps({"error": f"Unknown tool: {name}"})
+                )
+            ]
     except Exception as exc:
         logger.error("sql_mcp_tool_failed", tool=name, error=str(exc))
         return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
@@ -138,7 +150,12 @@ async def _query_prices(
             }
             for r in rows
         ]
-    return [TextContent(type="text", text=json.dumps({"ticker": ticker, "count": len(data), "data": data}))]
+    return [
+        TextContent(
+            type="text",
+            text=json.dumps({"ticker": ticker, "count": len(data), "data": data}),
+        )
+    ]
 
 
 async def _get_arbitrage_history(
@@ -168,7 +185,12 @@ async def _get_arbitrage_history(
             }
             for r in rows
         ]
-    return [TextContent(type="text", text=json.dumps({"ticker_us": ticker_us, "count": len(data), "data": data}))]
+    return [
+        TextContent(
+            type="text",
+            text=json.dumps({"ticker_us": ticker_us, "count": len(data), "data": data}),
+        )
+    ]
 
 
 async def _get_alerts(
@@ -194,7 +216,9 @@ async def _get_alerts(
             }
             for r in rows
         ]
-    return [TextContent(type="text", text=json.dumps({"count": len(data), "alerts": data}))]
+    return [
+        TextContent(type="text", text=json.dumps({"count": len(data), "alerts": data}))
+    ]
 
 
 async def _get_sentiment_history(ticker: str, limit: int = 30) -> list[TextContent]:
@@ -208,10 +232,18 @@ async def _get_sentiment_history(ticker: str, limit: int = 30) -> list[TextConte
         result = await session.execute(stmt)
         rows = result.scalars().all()
         data = [
-            {"timestamp": str(r.timestamp), "score": float(r.score), "headline_count": r.headline_count}
+            {
+                "timestamp": str(r.timestamp),
+                "score": float(r.score),
+                "headline_count": r.headline_count,
+            }
             for r in rows
         ]
-    return [TextContent(type="text", text=json.dumps({"ticker": ticker, "sentiment_history": data}))]
+    return [
+        TextContent(
+            type="text", text=json.dumps({"ticker": ticker, "sentiment_history": data})
+        )
+    ]
 
 
 async def _get_volume_spikes(ticker: str, limit: int = 20) -> list[TextContent]:
@@ -235,7 +267,11 @@ async def _get_volume_spikes(ticker: str, limit: int = 20) -> list[TextContent]:
             {"timestamp": str(r.timestamp), "volume": r.volume, "close": float(r.close)}
             for r in rows
         ]
-    return [TextContent(type="text", text=json.dumps({"ticker": ticker, "volume_spikes": data}))]
+    return [
+        TextContent(
+            type="text", text=json.dumps({"ticker": ticker, "volume_spikes": data})
+        )
+    ]
 
 
 async def main() -> None:
@@ -246,4 +282,5 @@ async def main() -> None:
 
 if __name__ == "__main__":
     import asyncio
+
     asyncio.run(main())

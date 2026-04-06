@@ -126,6 +126,32 @@ services:
     networks:
       - marketmind_net
 
+  # ── Streamlit Dashboard ───────────────────────────────────────────
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+      platforms:
+        - linux/arm64
+    container_name: marketmind-dashboard
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://marketmind:${POSTGRES_PASSWORD:-marketmind_dev_password}@postgres:5432/marketmind
+      REDIS_URL: redis://redis:6379/0
+    command: ["streamlit", "run", "src/ui/dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    ports:
+      - "8501:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - marketmind_net
+
   # ── Alembic Migrations (runs once on startup) ─────────────────────
   migrate:
     build:

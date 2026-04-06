@@ -158,19 +158,23 @@ def generate_signals(prices: pd.Series, volume: pd.Series) -> dict:
     vol_spikes = volume_spike(volume)
 
     latest = prices.iloc[-1]
-    latest_rsi = float(rsi_result.values.iloc[-1]) if not rsi_result.values.empty else None
+    latest_rsi = (
+        float(rsi_result.values.iloc[-1]) if not rsi_result.values.empty else None
+    )
 
     return {
         "price": float(latest),
         "rsi": latest_rsi,
         "rsi_signal": (
-            "OVERSOLD" if latest_rsi and latest_rsi <= 30
-            else "OVERBOUGHT" if latest_rsi and latest_rsi >= 70
-            else "NEUTRAL"
+            "OVERSOLD"
+            if latest_rsi and latest_rsi <= 30
+            else "OVERBOUGHT" if latest_rsi and latest_rsi >= 70 else "NEUTRAL"
         ),
         "macd_line": float(macd_result.macd_line.iloc[-1]),
         "macd_signal": float(macd_result.signal_line.iloc[-1]),
         "macd_histogram": float(macd_result.histogram.iloc[-1]),
         "volume_spike": bool(vol_spikes.iloc[-1]) if not vol_spikes.empty else False,
-        "moving_averages": {k: float(v.iloc[-1]) for k, v in mas.items() if not v.empty},
+        "moving_averages": {
+            k: float(v.iloc[-1]) for k, v in mas.items() if not v.empty
+        },
     }

@@ -1,22 +1,27 @@
 """Quant Engine Agent — technical analysis, Fibonacci, arbitrage signals."""
 
 import asyncio
-from dataclasses import asdict, dataclass
+import dataclasses
+from dataclasses import dataclass
 from datetime import datetime
 
-import yfinance as yf
 import pandas as pd
+import yfinance as yf
+from sqlalchemy import select
 
 from src.database.cache import cache
-from src.database.session import AsyncSessionLocal
 from src.database.models import PriceHistory
+from src.database.session import AsyncSessionLocal
+from src.quant.arbitrage import DUAL_LISTED, calculate_arbitrage
+from src.quant.fibonacci import FibonacciLevels, calculate_fibonacci
 from src.quant.indicators import generate_signals
-from src.quant.fibonacci import calculate_fibonacci, FibonacciLevels
-from src.quant.arbitrage import calculate_arbitrage, ArbitrageSignal, DUAL_LISTED
 from src.utils.logger import get_logger
 from src.utils.timezone_utils import market_status, now_utc
 
 logger = get_logger(__name__)
+
+# Tickers polled every minute during market hours
+_WATCHLIST_BASE = ["AAPL", "MSFT", "SPY", "QQQ"]
 
 
 @dataclass
@@ -28,6 +33,7 @@ class QuantSignal:
     fibonacci: dict | None = None
     arbitrage: dict | None = None
     market_status: dict | None = None
+    ohlcv: dict | None = None  # last bar OHLCV for DB persistence
 
 
 class QuantEngine:
@@ -53,7 +59,6 @@ class QuantEngine:
         Returns:
             DataFrame with OHLCV columns.
         """
-        # Check Redis cache for 1-minute quotes
         if interval == "1m":
             cached = await cache.get_quote(ticker)
             if cached:
@@ -61,15 +66,24 @@ class QuantEngine:
                 return pd.DataFrame(cached)
 
         loop = asyncio.get_event_loop()
-        df = await loop.run_in_executor(
+        df: pd.DataFrame = await loop.run_in_executor(
             None,
-            lambda: yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False),
+            lambda: yf.download(
+                ticker,
+                period=period,
+                interval=interval,
+                auto_adjust=True,
+                progress=False,
+            ),
         )
 
         if df.empty:
             raise ValueError(f"No data returned for {ticker}")
 
-        # Cache 1-min quotes
+        # Flatten MultiIndex columns when yfinance returns them for a single ticker
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
         if interval == "1m":
             await cache.cache_quote(ticker, df.tail(10).to_dict())
 
@@ -78,16 +92,27 @@ class QuantEngine:
     async def analyze(self, ticker: str) -> QuantSignal:
         """Run full quantitative analysis for a ticker.
 
-        Returns a QuantSignal dataclass with all indicators.
+        Args:
+            ticker: Ticker symbol.
+
+        Returns:
+            QuantSignal dataclass with all indicators, Fibonacci, and arbitrage data.
         """
         logger.info("quant_analysis_start", ticker=ticker)
 
-        # Fetch daily data (1 year for proper MA calculations)
         df = await self.fetch_price_data(ticker, period="1y", interval="1d")
         closes = df["Close"].squeeze()
         volumes = df["Volume"].squeeze()
 
-        # Generate technical signals
+        # Capture last bar for DB persistence
+        ohlcv = {
+            "open": float(df["Open"].iloc[-1]),
+            "high": float(df["High"].iloc[-1]),
+            "low": float(df["Low"].iloc[-1]),
+            "close": float(df["Close"].iloc[-1]),
+            "volume": int(df["Volume"].iloc[-1]),
+        }
+
         signals = generate_signals(closes, volumes)
 
         # Fibonacci from 52-week H/L
@@ -108,7 +133,9 @@ class QuantEngine:
         if ticker.upper() in DUAL_LISTED:
             tase_ticker = DUAL_LISTED[ticker.upper()]
             try:
-                tase_df = await self.fetch_price_data(tase_ticker, period="5d", interval="1d")
+                tase_df = await self.fetch_price_data(
+                    tase_ticker, period="5d", interval="1d"
+                )
                 tase_price = float(tase_df["Close"].iloc[-1])
                 arb_signal = await calculate_arbitrage(
                     ticker_us=ticker.upper(),
@@ -134,6 +161,7 @@ class QuantEngine:
             fibonacci=fib_dict,
             arbitrage=arb_dict,
             market_status=market_status(),
+            ohlcv=ohlcv,
         )
 
         logger.info(
@@ -147,7 +175,6 @@ class QuantEngine:
     async def health_check(self) -> dict[str, str]:
         """Agent health check."""
         try:
-            # Quick test with a liquid US stock
             df = await self.fetch_price_data("SPY", period="5d", interval="1d")
             if df.empty:
                 return {"status": "error", "detail": "yfinance returned empty data"}
@@ -156,16 +183,77 @@ class QuantEngine:
             return {"status": "error", "detail": str(exc)}
 
     async def run_loop(self) -> None:
-        """Continuous analysis loop — runs every minute during market hours."""
+        """Continuous analysis loop — polls watchlist every minute during market hours."""
         self._running = True
         logger.info("quant_engine_started")
         while self._running:
             status = market_status()
             if status["nyse_open"] or status["tase_open"]:
-                logger.debug("market_open_polling")
-                # In production, iterate over watched tickers from DB
+                await self._poll_watchlist()
             await asyncio.sleep(self._poll_interval)
 
+    async def _poll_watchlist(self) -> None:
+        """Analyze all watchlist tickers and cache results in Redis."""
+        # Deduplicated watchlist: dual-listed + base US stocks
+        seen: set[str] = set()
+        watchlist: list[str] = []
+        for t in list(DUAL_LISTED.keys()) + _WATCHLIST_BASE:
+            if t not in seen:
+                seen.add(t)
+                watchlist.append(t)
+
+        for ticker in watchlist:
+            try:
+                signal = await self.analyze(ticker)
+                # Cache signal for 2 minutes
+                await cache.set(f"signal:{ticker}", dataclasses.asdict(signal), ttl=120)
+                await self._upsert_price_history(ticker, signal)
+            except Exception as exc:
+                logger.warning("watchlist_poll_failed", ticker=ticker, error=str(exc))
+
+        logger.debug("watchlist_poll_complete", count=len(watchlist))
+
+    async def _upsert_price_history(self, ticker: str, signal: QuantSignal) -> None:
+        """Persist the latest OHLCV bar to PostgreSQL via SQLAlchemy ORM.
+
+        Args:
+            ticker: Ticker symbol.
+            signal: QuantSignal containing ohlcv and timestamp.
+        """
+        if not signal.ohlcv:
+            return
+
+        exchange = "TASE" if ticker.upper().endswith(".TA") else "NYSE"
+        timestamp = datetime.fromisoformat(signal.timestamp)
+
+        async with AsyncSessionLocal() as session:
+            stmt = select(PriceHistory).where(
+                PriceHistory.ticker == ticker.upper(),
+                PriceHistory.timestamp == timestamp,
+                PriceHistory.timeframe == "1d",
+            )
+            existing = (await session.execute(stmt)).scalar_one_or_none()
+
+            if existing is not None:
+                existing.close = signal.ohlcv["close"]
+                existing.volume = signal.ohlcv["volume"]
+            else:
+                row = PriceHistory(
+                    ticker=ticker.upper(),
+                    exchange=exchange,
+                    timestamp=timestamp,
+                    timeframe="1d",
+                    open=signal.ohlcv["open"],
+                    high=signal.ohlcv["high"],
+                    low=signal.ohlcv["low"],
+                    close=signal.ohlcv["close"],
+                    volume=signal.ohlcv["volume"],
+                )
+                session.add(row)
+
+            await session.commit()
+
     def stop(self) -> None:
+        """Stop the run loop."""
         self._running = False
         logger.info("quant_engine_stopped")

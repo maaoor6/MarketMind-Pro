@@ -3,9 +3,7 @@
 import numpy as np
 import pandas as pd
 import pytest
-
-from src.quant.indicators import ema, macd, rsi, sma, volume_spike, all_moving_averages
-
+from src.quant.indicators import all_moving_averages, ema, macd, rsi, sma, volume_spike
 
 # ── Fixtures ──────────────────────────────────────────────────────────
 
@@ -25,8 +23,28 @@ def flat_prices() -> pd.Series:
 def rsi_prices() -> pd.Series:
     """Known RSI test data — alternating up/down days."""
     return pd.Series(
-        [44.34, 44.09, 44.15, 43.61, 44.33, 44.83, 45.10, 45.15, 43.61, 44.33,
-         44.83, 45.10, 45.15, 45.89, 46.23, 46.08, 45.89, 46.03, 45.61, 46.28]
+        [
+            44.34,
+            44.09,
+            44.15,
+            43.61,
+            44.33,
+            44.83,
+            45.10,
+            45.15,
+            43.61,
+            44.33,
+            44.83,
+            45.10,
+            45.15,
+            45.89,
+            46.23,
+            46.08,
+            45.89,
+            46.03,
+            45.61,
+            46.28,
+        ]
     )
 
 
@@ -151,7 +169,7 @@ def test_macd_histogram_equals_macd_minus_signal():
 @pytest.mark.unit
 def test_macd_uptrend():
     """In a strong uptrend, MACD line should be positive."""
-    prices = pd.Series([float(i ** 1.5) for i in range(1, 101)])
+    prices = pd.Series([float(i**1.5) for i in range(1, 101)])
     result = macd(prices)
     valid = result.macd_line.dropna()
     assert float(valid.iloc[-1]) > 0
@@ -182,7 +200,9 @@ def test_volume_spike_no_spike():
 def test_all_moving_averages_keys():
     prices = pd.Series(range(1, 251), dtype=float)
     result = all_moving_averages(prices)
-    expected_keys = {f"{t}_{p}" for t in ("SMA", "EMA") for p in (20, 50, 100, 150, 200)}
+    expected_keys = {
+        f"{t}_{p}" for t in ("SMA", "EMA") for p in (20, 50, 100, 150, 200)
+    }
     assert set(result.keys()) == expected_keys
 
 
@@ -191,4 +211,6 @@ def test_all_moving_averages_values_finite():
     prices = pd.Series(range(1, 251), dtype=float)
     result = all_moving_averages(prices)
     for name, series in result.items():
-        assert np.isfinite(float(series.dropna().iloc[-1])), f"{name} has non-finite last value"
+        assert np.isfinite(
+            float(series.dropna().iloc[-1])
+        ), f"{name} has non-finite last value"
