@@ -1,8 +1,12 @@
 """SQL MCP Server — AI-accessible structured data queries over PostgreSQL."""
 
 import json
+import sys
 from typing import Any
 
+import uvicorn
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
@@ -10,14 +14,58 @@ from sqlalchemy import func, select
 
 from src.database.models import DualListingGap, PriceHistory, SentimentRecord, UserAlert
 from src.database.session import AsyncSessionLocal
+from src.utils.config import settings
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-app = Server("sql-mcp-server")
+mcp_app = Server("sql-mcp-server")
+http_app = FastAPI(title="SQL MCP Server", version="1.0.0")
 
 
-@app.list_tools()
+# ── HTTP endpoints ────────────────────────────────────────────────────────────
+
+
+@http_app.get("/health")
+async def health() -> dict:
+    """Health check endpoint."""
+    return {"status": "ok", "detail": "SQL MCP server running"}
+
+
+@http_app.post("/tools/query_prices")
+async def query_prices_endpoint(body: dict) -> JSONResponse:
+    results = await _query_prices(**body)
+    return JSONResponse(content=json.loads(results[0].text))
+
+
+@http_app.post("/tools/get_arbitrage_history")
+async def get_arbitrage_history_endpoint(body: dict) -> JSONResponse:
+    results = await _get_arbitrage_history(**body)
+    return JSONResponse(content=json.loads(results[0].text))
+
+
+@http_app.post("/tools/get_alerts")
+async def get_alerts_endpoint(body: dict) -> JSONResponse:
+    results = await _get_alerts(**body)
+    return JSONResponse(content=json.loads(results[0].text))
+
+
+@http_app.post("/tools/get_sentiment_history")
+async def get_sentiment_history_endpoint(body: dict) -> JSONResponse:
+    results = await _get_sentiment_history(**body)
+    return JSONResponse(content=json.loads(results[0].text))
+
+
+@http_app.post("/tools/get_volume_spikes")
+async def get_volume_spikes_endpoint(body: dict) -> JSONResponse:
+    results = await _get_volume_spikes(**body)
+    return JSONResponse(content=json.loads(results[0].text))
+
+
+# ── MCP tool declarations ─────────────────────────────────────────────────────
+
+
+@mcp_app.list_tools()
 async def list_tools() -> list[Tool]:
     return [
         Tool(
@@ -94,7 +142,7 @@ async def list_tools() -> list[Tool]:
     ]
 
 
-@app.call_tool()
+@mcp_app.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     """Dispatch MCP tool calls."""
     try:
@@ -117,6 +165,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     except Exception as exc:
         logger.error("sql_mcp_tool_failed", tool=name, error=str(exc))
         return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
+
+
+# ── Tool implementations ──────────────────────────────────────────────────────
 
 
 async def _query_prices(
@@ -275,9 +326,21 @@ async def _get_volume_spikes(ticker: str, limit: int = 20) -> list[TextContent]:
 
 
 async def main() -> None:
-    logger.info("sql_mcp_server_starting")
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(read_stream, write_stream, app.create_initialization_options())
+    """Run as HTTP server (for Docker) or stdio (for MCP clients like Claude Desktop)."""
+    if "--stdio" in sys.argv:
+        logger.info("sql_mcp_server_starting", mode="stdio")
+        async with stdio_server() as (read_stream, write_stream):
+            await mcp_app.run(
+                read_stream, write_stream, mcp_app.create_initialization_options()
+            )
+    else:
+        port = settings.sql_mcp_port
+        logger.info("sql_mcp_server_starting", mode="http", port=port)
+        config = uvicorn.Config(
+            http_app, host="0.0.0.0", port=port, log_level="warning"  # nosec B104
+        )
+        server = uvicorn.Server(config)
+        await server.serve()
 
 
 if __name__ == "__main__":

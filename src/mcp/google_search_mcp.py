@@ -1,9 +1,12 @@
-"""Google Search MCP Server — exposes web search as an MCP tool for AI agents."""
+"""Google Search MCP Server — exposes web search as HTTP endpoints for AI agents."""
 
 import json
 from typing import Any
 
 import httpx
+import uvicorn
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
@@ -13,7 +16,8 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-app = Server("google-search-mcp")
+mcp_app = Server("google-search-mcp")
+http_app = FastAPI(title="Google Search MCP", version="1.0.0")
 
 FINANCIAL_SITES = [
     "globes.co.il",
@@ -27,7 +31,55 @@ FINANCIAL_SITES = [
 ]
 
 
-@app.list_tools()
+# ── HTTP endpoints (used by NewsSearchAgent) ──────────────────────────────────
+
+
+@http_app.get("/health")
+async def health() -> dict:
+    """Health check endpoint."""
+    api_configured = bool(settings.google_api_key and settings.google_search_engine_id)
+    return {
+        "status": "ok",
+        "detail": "Google Search MCP running",
+        "api_configured": api_configured,
+    }
+
+
+@http_app.post("/tools/search_web")
+async def search_web_endpoint(body: dict) -> JSONResponse:
+    """Search the web for financial news."""
+    results = await _search_web(
+        query=body.get("query", ""),
+        num_results=body.get("num_results", 5),
+        site_filter=body.get("site_filter"),
+    )
+    data = json.loads(results[0].text)
+    return JSONResponse(content=data)
+
+
+@http_app.post("/tools/scrape_page")
+async def scrape_page_endpoint(body: dict) -> JSONResponse:
+    """Scrape a financial news article."""
+    results = await _scrape_page(url=body.get("url", ""))
+    data = json.loads(results[0].text)
+    return JSONResponse(content=data)
+
+
+@http_app.post("/tools/search_financial_news")
+async def search_financial_news_endpoint(body: dict) -> JSONResponse:
+    """Search for financial news about a ticker."""
+    results = await _search_financial_news(
+        ticker=body.get("ticker", ""),
+        language=body.get("language", "both"),
+    )
+    data = json.loads(results[0].text)
+    return JSONResponse(content=data)
+
+
+# ── MCP tool declarations ─────────────────────────────────────────────────────
+
+
+@mcp_app.list_tools()
 async def list_tools() -> list[Tool]:
     """Declare available tools to MCP clients."""
     return [
@@ -101,7 +153,7 @@ async def list_tools() -> list[Tool]:
     ]
 
 
-@app.call_tool()
+@mcp_app.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     """Dispatch tool calls to implementations."""
     if name == "search_web":
@@ -119,6 +171,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         )
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
+
+
+# ── Tool implementations ──────────────────────────────────────────────────────
 
 
 async def _search_web(
@@ -176,7 +231,6 @@ async def _search_web(
 
 async def _scrape_page(url: str) -> list[TextContent]:
     """Fetch page content from a URL."""
-    # Security: only allow known financial domains
     allowed_domains = set(FINANCIAL_SITES) | {"sec.gov", "tase.co.il"}
     domain = url.split("/")[2] if url.count("/") >= 2 else ""
     if not any(allowed in domain for allowed in allowed_domains):
@@ -192,8 +246,7 @@ async def _scrape_page(url: str) -> list[TextContent]:
             headers = {"User-Agent": "MarketMind-Pro/1.0 (Research Bot)"}
             response = await client.get(url, headers=headers)
             response.raise_for_status()
-            # Return raw text (no HTML parsing — keep dependency minimal)
-            text = response.text[:5000]  # Limit to 5k chars
+            text = response.text[:5000]
             return [
                 TextContent(type="text", text=json.dumps({"url": url, "content": text}))
             ]
@@ -237,10 +290,23 @@ async def _search_financial_news(
 
 
 async def main() -> None:
-    """Run the MCP server over stdio."""
-    logger.info("google_search_mcp_starting", port="stdio")
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(read_stream, write_stream, app.create_initialization_options())
+    """Run as HTTP server (for Docker) or stdio (for MCP clients like Claude Desktop)."""
+    import sys
+
+    if "--stdio" in sys.argv:
+        logger.info("google_search_mcp_starting", mode="stdio")
+        async with stdio_server() as (read_stream, write_stream):
+            await mcp_app.run(
+                read_stream, write_stream, mcp_app.create_initialization_options()
+            )
+    else:
+        port = settings.google_search_mcp_port
+        logger.info("google_search_mcp_starting", mode="http", port=port)
+        config = uvicorn.Config(
+            http_app, host="0.0.0.0", port=port, log_level="warning"  # nosec B104
+        )
+        server = uvicorn.Server(config)
+        await server.serve()
 
 
 if __name__ == "__main__":

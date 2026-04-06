@@ -40,6 +40,7 @@ WORKDIR /app
 # Copy virtual environment from builder
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
+ENV PYTHONPATH="/app"
 
 # Copy application source
 COPY --chown=marketmind:marketmind src/ ./src/
@@ -47,9 +48,9 @@ COPY --chown=marketmind:marketmind alembic/ ./alembic/
 COPY --chown=marketmind:marketmind alembic.ini ./
 COPY --chown=marketmind:marketmind pyproject.toml ./
 
-# Create data directories
-RUN mkdir -p data/raw data/processed/charts data/cache && \
-    chown -R marketmind:marketmind data/
+# Create data directories and streamlit config dir
+RUN mkdir -p data/raw data/processed/charts data/cache .streamlit && \
+    chown -R marketmind:marketmind data/ .streamlit
 
 # Create __init__ files
 RUN touch src/__init__.py src/agents/__init__.py src/quant/__init__.py \

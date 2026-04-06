@@ -66,6 +66,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://marketmind:${POSTGRES_PASSWORD:-marketmind_dev_password}@postgres:5432/marketmind
       DATABASE_URL_SYNC: postgresql+psycopg2://marketmind:${POSTGRES_PASSWORD:-marketmind_dev_password}@postgres:5432/marketmind
       REDIS_URL: redis://redis:6379/0
+      PYTHONPATH: /app
     depends_on:
       postgres:
         condition: service_healthy
@@ -95,6 +96,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://marketmind:${POSTGRES_PASSWORD:-marketmind_dev_password}@postgres:5432/marketmind
       REDIS_URL: redis://redis:6379/0
+      PYTHONPATH: /app
     command: ["python", "-m", "src.mcp.google_search_mcp"]
     ports:
       - "8001:8001"
@@ -116,6 +118,7 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+asyncpg://marketmind:${POSTGRES_PASSWORD:-marketmind_dev_password}@postgres:5432/marketmind
+      PYTHONPATH: /app
     command: ["python", "-m", "src.mcp.sql_mcp_server"]
     ports:
       - "8002:8002"
@@ -140,6 +143,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://marketmind:${POSTGRES_PASSWORD:-marketmind_dev_password}@postgres:5432/marketmind
       REDIS_URL: redis://redis:6379/0
+      PYTHONPATH: /app
     command: ["streamlit", "run", "src/ui/dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
     ports:
       - "8501:8501"

@@ -36,6 +36,7 @@ select = [
 ignore = [
     "S101",   # assert in tests is fine
     "S311",   # random module OK for non-crypto uses
+    "S104",   # binding to 0.0.0.0 is required for Docker containers
     "E501",   # line too long — unavoidable with Hebrew strings and long f-strings
 ]
 
