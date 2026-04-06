@@ -10,33 +10,40 @@ from decimal import Decimal
 import pytest
 import pytest_asyncio
 import pytz
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from src.database.models import Base, DualListingGap, PriceHistory, UserAlert
-from src.database.session import AsyncSessionLocal, async_engine, check_db_connection
+from src.database.session import check_db_connection
+from src.utils.config import settings
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_db_connection():
+async def test_db_connection() -> None:
     result = await check_db_connection()
     assert result["status"] == "ok"
 
 
-@pytest_asyncio.fixture(loop_scope="function")
-async def db_session():
-    """Create a clean test session with rollback."""
-    async with async_engine.begin() as conn:
+@pytest_asyncio.fixture
+async def db_session() -> AsyncSession:
+    """Create a fresh engine + session per test to avoid event loop conflicts."""
+    engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    session_factory = async_sessionmaker(
+        bind=engine, class_=AsyncSession, expire_on_commit=False
+    )
+
+    async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    async with AsyncSessionLocal() as session:
+    async with session_factory() as session:
         yield session
         await session.rollback()
 
-    await async_engine.dispose()
+    await engine.dispose()
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_insert_price_history(db_session):
+async def test_insert_price_history(db_session: AsyncSession) -> None:
     record = PriceHistory(
         ticker="TEVA",
         exchange="NYSE",
@@ -56,7 +63,7 @@ async def test_insert_price_history(db_session):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_insert_user_alert(db_session):
+async def test_insert_user_alert(db_session: AsyncSession) -> None:
     alert = UserAlert(
         chat_id="123456789",
         ticker="AAPL",
@@ -71,7 +78,7 @@ async def test_insert_user_alert(db_session):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_insert_dual_listing_gap(db_session):
+async def test_insert_dual_listing_gap(db_session: AsyncSession) -> None:
     gap = DualListingGap(
         ticker_us="TEVA",
         ticker_tase="TEVA.TA",
