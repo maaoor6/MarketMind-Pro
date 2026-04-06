@@ -53,6 +53,8 @@ markers = [
     "integration: requires postgres + redis (docker)",
     "slow: long-running tests",
 ]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
 addopts = "-v --tb=short"
 
 [tool.coverage.run]

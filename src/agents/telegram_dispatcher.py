@@ -13,32 +13,33 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 from src.agents.news_search_agent import NewsSearchAgent
 from src.agents.quant_engine import QuantEngine
-from src.quant.arbitrage import DUAL_LISTED, calculate_arbitrage
 from src.quant.fibonacci import calculate_fibonacci
 from src.quant.fundamentals import (
     CompanyProfile,
     fetch_company_profile,
     fetch_insider_transactions,
-    format_insiders_hebrew,
-    format_profile_hebrew,
+    format_insiders_english,
+    format_profile_english,
     save_insider_transactions,
 )
-from src.ui.publisher import publish_ticker_chart
+from src.ui.publisher import PAGES_BASE_URL, publish_ticker_chart
 from src.utils.config import settings
 from src.utils.logger import get_logger
 from src.utils.timezone_utils import (
-    currency_symbol,
-    is_friday_session,
     market_status,
-    now_tase,
     now_us,
+    time_to_nyse_open,
 )
 
 logger = get_logger(__name__)
+
+_ET = pytz.timezone("America/New_York")
 
 # Module-level agent instances
 _quant_engine = QuantEngine()
@@ -69,42 +70,38 @@ def link(text: str, url: str) -> str:
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /start command — Hebrew welcome message with inline keyboard."""
+    """Handle /start command — English welcome with NYSE countdown."""
     keyboard = [
         [
-            InlineKeyboardButton("📊 ניתוח מניה", callback_data="prompt_analyze"),
-            InlineKeyboardButton("🌡️ בדיקת מערכת", callback_data="health"),
+            InlineKeyboardButton("📊 Analyze Stock", callback_data="prompt_analyze"),
+            InlineKeyboardButton("🌡️ System Health", callback_data="health"),
         ],
         [
-            InlineKeyboardButton("📰 דוח פתיחת שוק", callback_data="market_open"),
-            InlineKeyboardButton("📐 רמות פיבונאצ'י", callback_data="prompt_fibonacci"),
+            InlineKeyboardButton("📰 Market Report", callback_data="market_open"),
+            InlineKeyboardButton("📐 Fibonacci", callback_data="prompt_fibonacci"),
         ],
         [
-            InlineKeyboardButton("⚖️ ארביטראז'", callback_data="prompt_arbitrage"),
-            InlineKeyboardButton("🆚 השוואת מניות", callback_data="prompt_compare"),
+            InlineKeyboardButton("🆚 Compare Stocks", callback_data="prompt_compare"),
         ],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
+    nyse_countdown = time_to_nyse_open()
     mkt = market_status()
-    nyse_status = "🟢 פתוח" if mkt["nyse_open"] else "🔴 סגור"
-    tase_status = "🟢 פתוח" if mkt["tase_open"] else "🔴 סגור"
-    friday_note = (
-        "\n⚠️ <i>יום שישי — סגירה מוקדמת 15:45</i>" if mkt.get("tase_friday") else ""
-    )
+    nyse_status = "🟢 Open" if mkt["nyse_open"] else "🔴 Closed"
 
     msg = (
-        "🤖 <b>MarketMind-Pro</b> — מערכת מסחר אוטונומית\n\n"
-        "📡 <b>מצב שוק:</b>\n"
-        f"  🇺🇸 NYSE: {nyse_status} ({mkt['us_time']})\n"
-        f"  🇮🇱 ת\"א: {tase_status} ({mkt['tase_time']}){friday_note}\n\n"
-        "📋 <b>פקודות זמינות:</b>\n"
-        "  • /analyze <code>[מניה]</code> — ניתוח מלא + פונדמנטלי + סנטימנט\n"
-        "  • /fibonacci <code>[מניה]</code> — רמות פיבונאצ'י 52 שבועות\n"
-        "  • /arbitrage <code>[מניה]</code> — פער ארביטראז' TASE/NYSE\n"
-        "  • /compare <code>[מניה1] [מניה2]</code> — השוואת מניות\n"
-        "  • /health — סטטוס מערכת\n\n"
-        "בחר פעולה:"
+        "🤖 <b>MarketMind-Pro</b> — Institutional Trading Intelligence\n\n"
+        "📡 <b>Market Status:</b>\n"
+        f"  🇺🇸 NYSE: {nyse_status}\n"
+        f"  ⏱ {nyse_countdown}\n\n"
+        "📋 <b>Available Commands:</b>\n"
+        "  • /analyze <code>[TICKER]</code> — Full technical + fundamental + news report\n"
+        "  • /news <code>[TICKER]</code> — Top 5 live news headlines with summaries\n"
+        "  • /compare <code>[T1] [T2]</code> — Side-by-side stock comparison\n"
+        "  • /fibonacci <code>[TICKER]</code> — 52-week Fibonacci levels\n"
+        "  • /health — System status\n\n"
+        "Choose an action:"
     )
 
     await update.message.reply_text(
@@ -112,8 +109,31 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def _wait_for_pages(url: str, timeout: int = 60) -> bool:
+    """Poll a GitHub Pages URL until it returns HTTP 200 or timeout expires.
+
+    GitHub Pages can take 10–60 seconds to propagate after a Contents API push.
+    Returns True if the page became available, False on timeout.
+    """
+    import httpx as _httpx
+
+    deadline = asyncio.get_event_loop().time() + timeout
+    async with _httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                resp = await client.head(url)
+                if resp.status_code == 200:
+                    logger.debug("pages_ready", url=url)
+                    return True
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("pages_poll_error", url=url, error=str(exc))
+            await asyncio.sleep(4)
+    logger.warning("pages_timeout", url=url, timeout=timeout)
+    return False
+
+
 async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /analyze [TICKER] — full Hebrew analysis with fundamentals and chart link."""
+    """Handle /analyze [TICKER] — institutional-grade English analysis report."""
     msg_obj = update.message or (
         update.callback_query.message if update.callback_query else None
     )
@@ -122,14 +142,14 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if not context.args:
         await msg_obj.reply_text(
-            "❗ שימוש: /analyze מניה\nדוגמה: <code>/analyze TEVA</code>",
+            "❗ Usage: /analyze TICKER\nExample: <code>/analyze AAPL</code>",
             parse_mode=ParseMode.HTML,
         )
         return
 
     ticker = context.args[0].upper().strip()
     await msg_obj.reply_text(
-        f"⏳ מנתח את <b>{html.escape(ticker)}</b>... אנא המתן.",
+        f"⏳ Analyzing <b>{html.escape(ticker)}</b>... please wait.",
         parse_mode=ParseMode.HTML,
     )
 
@@ -143,7 +163,7 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         if isinstance(quant_signal, Exception):
             await msg_obj.reply_text(
-                f"❌ ניתוח נכשל: <code>{html.escape(str(quant_signal))}</code>",
+                f"❌ Analysis failed: <code>{html.escape(str(quant_signal))}</code>",
                 parse_mode=ParseMode.HTML,
             )
             return
@@ -172,6 +192,11 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
 
         # ── Phase 3: Publish chart to GitHub Pages (best-effort) ──
+        # Pre-construct the expected URL so the button always shows even if publish fails
+        chart_url = f"{PAGES_BASE_URL}/{ticker.lower()}_chart.html"
+        chart_published = False
+        df_for_chart = None
+        chart_error: str | None = None
         try:
             df_for_chart = await _quant_engine.fetch_price_data(
                 ticker, period="1y", interval="1d"
@@ -182,17 +207,18 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             chart_url = await publish_ticker_chart(
                 ticker, df_for_chart, fib_levels=fib_for_chart
             )
+            # Poll until GitHub Pages serves the file (avoids user seeing 404)
+            chart_published = await _wait_for_pages(chart_url, timeout=60)
         except Exception as pub_exc:
-            logger.warning("chart_publish_failed", ticker=ticker, error=str(pub_exc))
+            chart_error = str(pub_exc)
+            logger.warning("chart_publish_failed", ticker=ticker, error=chart_error)
 
         # ── Build message ──
         signals = quant_signal.signals
         fib = quant_signal.fibonacci
-        arb = quant_signal.arbitrage
         mkt = quant_signal.market_status or {}
 
         price = signals.get("price", 0)
-        sym = currency_symbol(ticker)
         rsi_val = signals.get("rsi")
         rsi_signal = signals.get("rsi_signal", "NEUTRAL")
         macd_line = signals.get("macd_line", 0)
@@ -201,48 +227,55 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         vol_spike = signals.get("volume_spike", False)
         mas = signals.get("moving_averages", {})
 
+        # Daily % change (prev close → today close)
+        day_pct_str = ""
+        if df_for_chart is not None and len(df_for_chart) >= 2:
+            prev_close = float(df_for_chart["Close"].iloc[-2])
+            curr_close = float(df_for_chart["Close"].iloc[-1])
+            day_pct = (curr_close - prev_close) / prev_close * 100
+            pct_sign = "+" if day_pct >= 0 else ""
+            pct_arrow = (
+                "📈" if day_pct > 0.005 else ("📉" if day_pct < -0.005 else "➡️")
+            )
+            day_pct_str = f"  {pct_arrow} {pct_sign}{day_pct:.2f}%"
+
         lines = [
-            f"📊 <b>ניתוח {html.escape(ticker)}</b>",
+            f"📊 <b>ANALYSIS — <code>{html.escape(ticker)}</code></b>",
             "━━━━━━━━━━━━━━━━━━━",
-        ]
-
-        # ── Company header (TOP) ──
-        if isinstance(profile_result, CompanyProfile):
-            lines.append(format_profile_hebrew(profile_result))
-            lines.append("")
-
-        lines += [
-            f"💰 <b>מחיר נוכחי:</b> <code>{sym}{price:,.2f}</code>",
-            f"🕐 <b>עדכון:</b> {datetime.utcnow().strftime('%d/%m/%Y %H:%M')} UTC",
+            f"💰 <b>Current Price:</b> <code>${price:,.2f}</code>{day_pct_str}",
+            f"🕐 <b>Updated:</b> {datetime.now(tz=_ET).strftime('%d/%m/%Y %H:%M')} ET",
             "",
         ]
 
+        # ── Company profile ──
+        if isinstance(profile_result, CompanyProfile):
+            lines.append(format_profile_english(profile_result))
+            lines.append("")
+
         # ── Technical indicators ──
-        rsi_emoji, rsi_he = _rsi_hebrew(rsi_signal)
+        rsi_emoji, rsi_label = _rsi_label(rsi_signal)
         lines += [
-            "📉 <b>אינדיקטורים טכניים:</b>",
-            f"  RSI(14): <code>{rsi_val:.1f}</code>  {rsi_emoji} {rsi_he}",
-            f"  MACD קו: <code>{macd_line:+.4f}</code>  |  סיגנל: <code>{macd_sig:+.4f}</code>",
-            f"  MACD היסטוגרמה: <code>{macd_hist:+.4f}</code>  {'📈 שורי' if macd_hist > 0 else '📉 דובי'}",
-            f"  ספייק נפח: {'⚡ כן — נפח חריג!' if vol_spike else '❌ לא'}",
+            "📉 <b>Technical Indicators:</b>",
+            f"  RSI(14): <code>{rsi_val:.1f}</code>  {rsi_emoji} {rsi_label}",
+            f"  MACD Line: <code>{macd_line:+.4f}</code>  |  Signal: <code>{macd_sig:+.4f}</code>",
+            f"  MACD Histogram: <code>{macd_hist:+.4f}</code>  {'📈 Bullish' if macd_hist > 0 else '📉 Bearish'}",
+            f"  Volume Spike: {'⚡ YES — Unusual Volume!' if vol_spike else '❌ No'}",
             "",
         ]
 
         # ── Moving averages ──
         if mas:
-            lines.append("📏 <b>ממוצעים נעים:</b>")
+            lines.append("📏 <b>Moving Averages:</b>")
             for ma_key in ["SMA_20", "SMA_50", "SMA_150", "SMA_200"]:
                 val = mas.get(ma_key)
                 if val:
-                    relation = "↑ מעל" if price > val else "↓ מתחת"
-                    lines.append(
-                        f"  {ma_key}: <code>{sym}{val:,.2f}</code>  {relation}"
-                    )
+                    relation = "↑ Above" if price > val else "↓ Below"
+                    lines.append(f"  {ma_key}: <code>${val:,.2f}</code>  {relation}")
             lines.append("")
 
         # ── Fibonacci ──
         if fib:
-            trend_he = "מגמת עלייה 📈" if fib["trend"] == "UPTREND" else "מגמת ירידה 📉"
+            trend_label = "Uptrend 📈" if fib["trend"] == "UPTREND" else "Downtrend 📉"
             high_52w = fib["high_52w"]
             low_52w = fib["low_52w"]
             pct_from_low = (
@@ -252,99 +285,58 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
 
             lines += [
-                "📐 <b>פיבונאצ'י (52 שבועות):</b>",
-                f"  שיא: <code>{sym}{high_52w:,.2f}</code>  |  שפל: <code>{sym}{low_52w:,.2f}</code>",
-                f"  {trend_he}  |  מיקום: {pct_from_low:.1f}% מהשפל",
-                f"  🟢 תמיכה קרובה: <code>{sym}{fib['nearest_support']:,.2f}</code>",
-                f"  🔴 התנגדות קרובה: <code>{sym}{fib['nearest_resistance']:,.2f}</code>",
+                "📐 <b>Fibonacci (52-Week):</b>",
+                f"  {trend_label}  |  Position: {pct_from_low:.1f}% from Low",
+                f"  High: <code>${high_52w:,.2f}</code>  |  Low: <code>${low_52w:,.2f}</code>",
+                f"  🟢 Nearest Support:    <code>${fib['nearest_support']:,.2f}</code>",
+                f"  🔴 Nearest Resistance: <code>${fib['nearest_resistance']:,.2f}</code>",
             ]
             retr = fib.get("retracements", {})
-            key_levels = ["23.6%", "38.2%", "50.0%", "61.8%"]
-            for lvl in key_levels:
+            for lvl in ["23.6%", "38.2%", "50.0%", "61.8%"]:
                 if lvl in retr:
                     marker = (
-                        " ◀ מחיר כאן"
+                        " ◀ Price here"
                         if abs(retr[lvl] - price) / max(price, 0.001) < 0.015
                         else ""
                     )
-                    lines.append(
-                        f"    {lvl}: <code>{sym}{retr[lvl]:,.2f}</code>{marker}"
-                    )
-            lines.append("")
-
-        # ── Arbitrage ──
-        if arb:
-            arb_emoji = "⚡" if arb["is_opportunity"] else "⚖️"
-            direction_he = (
-                'ארה"ב במחיר פרמיום'
-                if arb["gap_direction"] == "US_PREMIUM"
-                else 'ת"א במחיר פרמיום'
-            )
-            lines += [
-                f"{arb_emoji} <b>ארביטראז' TASE/NYSE:</b>",
-                f"  TASE ({html.escape(arb['ticker_tase'])}): <code>${arb['price_tase_in_usd']:,.3f}</code>  |  שער: <code>₪{arb['usd_ils_rate']:.4f}</code>",
-                f"  פער: <code>{arb['gap_pct']:.2f}%</code>  —  {direction_he}",
-            ]
-            if arb["is_opportunity"]:
-                lines.append("  ⚡ <b>הזדמנות ארביטראז' זוהתה!</b>")
+                    lines.append(f"    {lvl}: <code>${retr[lvl]:,.2f}</code>{marker}")
             lines.append("")
 
         # ── Insiders ──
         if insiders_result:
-            lines.append(format_insiders_hebrew(ticker, insiders_result))
+            lines.append(format_insiders_english(ticker, insiders_result))
             lines.append("")
 
-        # ── Sentiment ──
+        # ── Sentiment / News ──
         if not isinstance(sentiment, Exception) and sentiment:
-            score_bar = _sentiment_bar(sentiment.score)
-            lines += [
-                "📰 <b>סנטימנט חדשות:</b>",
-                f"  {sentiment.emoji} ציון: <code>{sentiment.score:+.2f}</code>  {score_bar}",
-            ]
-            if sentiment.summary_he:
-                lines.append(f"  <i>{html.escape(sentiment.summary_he)}</i>")
-            if sentiment.recent_headlines:
-                for item in sentiment.recent_headlines[:3]:
-                    src = item.get("source", "")
-                    title = item.get("title", "")
-                    snippet = item.get("snippet", "")
-                    lines.append(f"    • <b>{html.escape(title)}</b>")
-                    if snippet:
-                        lines.append(f"      <i>{html.escape(snippet)}</i>")
-                    if src:
-                        lines.append(f"      <code>{html.escape(src)}</code>")
-            elif sentiment.headlines_he:
-                for h_line in sentiment.headlines_he[:3]:
-                    lines.append(f"    • {html.escape(h_line)}")
-            elif sentiment.headlines_en:
-                for h_line in sentiment.headlines_en[:2]:
-                    lines.append(f"    • {html.escape(h_line)}")
+            lines += _format_news_block(ticker, sentiment)
             lines.append("")
 
         # ── Market status ──
         if mkt:
-            nyse_str = "🟢 פתוח" if mkt.get("nyse_open") else "🔴 סגור"
-            tase_str = "🟢 פתוח" if mkt.get("tase_open") else "🔴 סגור"
+            nyse_str = "🟢 Open" if mkt.get("nyse_open") else "🔴 Closed"
             lines += [
-                "🌍 <b>מצב שוק:</b>",
-                f'  🇺🇸 NYSE: {nyse_str}  |  🇮🇱 ת"א: {tase_str}',
+                "🌍 <b>Market Status:</b>",
+                f"  🇺🇸 NYSE: {nyse_str}",
             ]
 
         # ── Chart link ──
-        if chart_url:
-            lines += ["", f"📊 {link('צפה בגרף אינטראקטיבי', chart_url)}"]
+        if chart_error:
+            short_err = chart_error[:80]
+            lines += ["", f"⚠️ <i>Chart not published: {html.escape(short_err)}</i>"]
+        elif not chart_published:
+            # Publish succeeded but Pages propagation timed out — link still works shortly
+            lines += ["", "<i>📊 Chart published — may take a few seconds to load.</i>"]
 
-        # ── Inline keyboard ──
+        # ── Inline keyboard — always show Interactive Chart button ──
+        chart_btn = InlineKeyboardButton("📊 Interactive Chart", url=chart_url)
         keyboard = [
             [
-                InlineKeyboardButton("📐 פיבונאצ'י", callback_data=f"fib:{ticker}"),
-                InlineKeyboardButton("🔄 רענן", callback_data=f"analyze:{ticker}"),
+                chart_btn,
+                InlineKeyboardButton("🔄 Refresh", callback_data=f"analyze:{ticker}"),
+                InlineKeyboardButton("📰 News", callback_data=f"news:{ticker}"),
             ],
         ]
-        if ticker in DUAL_LISTED:
-            keyboard[0].append(
-                InlineKeyboardButton("⚖️ ארביטראז'", callback_data=f"arb:{ticker}")
-            )
 
         await msg_obj.reply_text(
             "\n".join(lines),
@@ -355,13 +347,72 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception as exc:
         logger.error("analyze_command_failed", ticker=ticker, error=str(exc))
         await msg_obj.reply_text(
-            f"❌ הניתוח נכשל: <code>{html.escape(str(exc))}</code>",
+            f"❌ Analysis failed: <code>{html.escape(str(exc))}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+
+
+async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /news [TICKER] — top 5 recent headlines with summaries and links."""
+    msg_obj = update.message or (
+        update.callback_query.message if update.callback_query else None
+    )
+    if not msg_obj:
+        return
+
+    if not context.args:
+        # No ticker → show global market snapshot
+        await msg_obj.reply_text(
+            "⏳ Fetching market data...", parse_mode=ParseMode.HTML
+        )
+        try:
+            snapshot = await _fetch_market_snapshot()
+            header = (
+                "📰 <b>MARKET SNAPSHOT</b>\n"
+                f"🕐 {datetime.now(tz=_ET).strftime('%d/%m/%Y %H:%M')} ET\n"
+                "━━━━━━━━━━━━━━━━━━━"
+            )
+            await msg_obj.reply_text(header + snapshot, parse_mode=ParseMode.HTML)
+        except Exception as exc:
+            await msg_obj.reply_text(
+                f"❌ Failed to fetch market data: <code>{html.escape(str(exc))}</code>",
+                parse_mode=ParseMode.HTML,
+            )
+        return
+
+    ticker = context.args[0].upper().strip()
+    await msg_obj.reply_text(
+        f"⏳ Fetching news for <b>{html.escape(ticker)}</b>...",
+        parse_mode=ParseMode.HTML,
+    )
+
+    try:
+        sentiment = await _news_agent.analyze_sentiment(ticker)
+        lines = _format_news_block(ticker, sentiment)
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "📊 Full Analysis", callback_data=f"analyze:{ticker}"
+                ),
+                InlineKeyboardButton("🔄 Refresh", callback_data=f"news:{ticker}"),
+            ]
+        ]
+        await msg_obj.reply_text(
+            "\n".join(lines),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True,
+        )
+
+    except Exception as exc:
+        await msg_obj.reply_text(
+            f"❌ News fetch failed: <code>{html.escape(str(exc))}</code>",
             parse_mode=ParseMode.HTML,
         )
 
 
 async def cmd_fibonacci(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /fibonacci [TICKER] — Hebrew Fibonacci report."""
+    """Handle /fibonacci [TICKER] — English Fibonacci report."""
     msg_obj = update.message or (
         update.callback_query.message if update.callback_query else None
     )
@@ -370,7 +421,7 @@ async def cmd_fibonacci(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if not context.args:
         await msg_obj.reply_text(
-            "❗ שימוש: /fibonacci מניה\nדוגמה: <code>/fibonacci AAPL</code>",
+            "❗ Usage: /fibonacci TICKER\nExample: <code>/fibonacci AAPL</code>",
             parse_mode=ParseMode.HTML,
         )
         return
@@ -383,42 +434,45 @@ async def cmd_fibonacci(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         closes = df_result["Close"].squeeze()
         levels = calculate_fibonacci(closes, ticker=ticker)
         price = levels.current_price
-        sym = currency_symbol(ticker)
         spread = levels.high_52w - levels.low_52w
         pct_from_low = ((price - levels.low_52w) / spread * 100) if spread > 0 else 0
-        trend_he = "מגמת עלייה 📈" if levels.trend == "UPTREND" else "מגמת ירידה 📉"
+        trend_label = "Uptrend 📈" if levels.trend == "UPTREND" else "Downtrend 📉"
 
         lines = [
-            f"📐 <b>רמות פיבונאצ'י — {html.escape(ticker)}</b>",
+            f"📐 <b>FIBONACCI LEVELS — <code>{html.escape(ticker)}</code></b>",
             "━━━━━━━━━━━━━━━━━━━",
-            f"  {trend_he}",
-            f"  שיא 52 שב': <code>{sym}{levels.high_52w:,.2f}</code>",
-            f"  שפל 52 שב': <code>{sym}{levels.low_52w:,.2f}</code>",
-            f"  מחיר נוכחי: <code>{sym}{price:,.2f}</code>  ({pct_from_low:.1f}% מהשפל)",
+            f"  {trend_label}",
+            f"  52W High: <code>${levels.high_52w:,.2f}</code>",
+            f"  52W Low:  <code>${levels.low_52w:,.2f}</code>",
+            f"  Current:  <code>${price:,.2f}</code>  ({pct_from_low:.1f}% from Low)",
             "",
-            "📉 <b>רמות חיזור (Retracement):</b>",
+            "📉 <b>Retracement Levels:</b>",
         ]
 
         for label, lvl_price in levels.retracements.items():
             relation = (
-                "◀ מחיר כאן"
+                "◀ Price here"
                 if abs(lvl_price - price) / max(price, 0.001) < 0.015
-                else ("↑ מעל" if price > lvl_price else "↓ מתחת")
+                else ("↑ Above" if price > lvl_price else "↓ Below")
             )
-            lines.append(f"  {label}: <code>{sym}{lvl_price:,.2f}</code>  {relation}")
+            lines.append(f"  {label}: <code>${lvl_price:,.2f}</code>  {relation}")
 
-        lines += ["", "📈 <b>רמות הרחבה (Extension):</b>"]
+        lines += ["", "📈 <b>Extension Levels:</b>"]
         for label, lvl_price in levels.extensions.items():
-            lines.append(f"  {label}: <code>{sym}{lvl_price:,.2f}</code>")
+            lines.append(f"  {label}: <code>${lvl_price:,.2f}</code>")
 
         lines += [
             "",
-            f"🟢 <b>תמיכה קרובה:</b> <code>{sym}{levels.nearest_support:,.2f}</code>",
-            f"🔴 <b>התנגדות קרובה:</b> <code>{sym}{levels.nearest_resistance:,.2f}</code>",
+            f"🟢 <b>Nearest Support:</b>    <code>${levels.nearest_support:,.2f}</code>",
+            f"🔴 <b>Nearest Resistance:</b> <code>${levels.nearest_resistance:,.2f}</code>",
         ]
 
         keyboard = [
-            [InlineKeyboardButton("📊 ניתוח מלא", callback_data=f"analyze:{ticker}")]
+            [
+                InlineKeyboardButton(
+                    "📊 Full Analysis", callback_data=f"analyze:{ticker}"
+                )
+            ]
         ]
         await msg_obj.reply_text(
             "\n".join(lines),
@@ -427,86 +481,13 @@ async def cmd_fibonacci(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
     except Exception as exc:
         await msg_obj.reply_text(
-            f"❌ חישוב פיבונאצ'י נכשל: <code>{html.escape(str(exc))}</code>",
-            parse_mode=ParseMode.HTML,
-        )
-
-
-async def cmd_arbitrage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /arbitrage [TICKER] — Hebrew arbitrage report."""
-    msg_obj = update.message or (
-        update.callback_query.message if update.callback_query else None
-    )
-    if not msg_obj:
-        return
-
-    if not context.args:
-        tickers = ", ".join(DUAL_LISTED.keys())
-        await msg_obj.reply_text(
-            f"❗ שימוש: /arbitrage מניה\nמניות כפול-רישום: <code>{tickers}</code>",
-            parse_mode=ParseMode.HTML,
-        )
-        return
-
-    ticker = context.args[0].upper().strip()
-    if ticker not in DUAL_LISTED:
-        await msg_obj.reply_text(
-            f"❌ {html.escape(ticker)} אינה ברשימת הכפול-רישום.\n"
-            f"זמינות: <code>{', '.join(DUAL_LISTED.keys())}</code>",
-            parse_mode=ParseMode.HTML,
-        )
-        return
-
-    try:
-        tase_ticker = DUAL_LISTED[ticker]
-        us_df, tase_df = await asyncio.gather(
-            _quant_engine.fetch_price_data(ticker, period="5d", interval="1d"),
-            _quant_engine.fetch_price_data(tase_ticker, period="5d", interval="1d"),
-        )
-        us_price = float(us_df["Close"].iloc[-1])
-        tase_price = float(tase_df["Close"].iloc[-1])
-        signal = await calculate_arbitrage(ticker, us_price, tase_price)
-
-        direction_he = (
-            'ארה"ב במחיר פרמיום 🇺🇸'
-            if signal.gap_direction == "US_PREMIUM"
-            else 'ת"א במחיר פרמיום 🇮🇱'
-        )
-        opp_line = (
-            "⚡ <b>הזדמנות ארביטראז' זוהתה!</b>"
-            if signal.is_opportunity
-            else "ℹ️ אין הזדמנות ארביטראז' משמעותית"
-        )
-        emoji = "⚡" if signal.is_opportunity else "⚖️"
-
-        lines = [
-            f"{emoji} <b>ארביטראז' — {html.escape(ticker)} / {html.escape(tase_ticker)}</b>",
-            "━━━━━━━━━━━━━━━━━━━",
-            f'  🇺🇸 מחיר ארה"ב: <code>${signal.price_us_usd:,.3f}</code>',
-            f'  🇮🇱 מחיר ת"א: <code>₪{signal.price_tase_ils:,.3f}</code>  (<code>${signal.price_tase_in_usd:,.3f}</code>)',
-            f"  💱 שער USD/ILS: <code>₪{signal.usd_ils_rate:.4f}</code>",
-            f"  📊 פער: <code>{signal.gap_pct:.2f}%</code>  —  {direction_he}",
-            "",
-            opp_line,
-        ]
-
-        keyboard = [
-            [InlineKeyboardButton("📊 ניתוח מלא", callback_data=f"analyze:{ticker}")]
-        ]
-        await msg_obj.reply_text(
-            "\n".join(lines),
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-    except Exception as exc:
-        await msg_obj.reply_text(
-            f"❌ חישוב ארביטראז' נכשל: <code>{html.escape(str(exc))}</code>",
+            f"❌ Fibonacci calculation failed: <code>{html.escape(str(exc))}</code>",
             parse_mode=ParseMode.HTML,
         )
 
 
 async def cmd_compare(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /compare TICKER1 TICKER2 — side-by-side Hebrew comparison table."""
+    """Handle /compare TICKER1 TICKER2 — side-by-side English comparison table."""
     msg_obj = update.message or (
         update.callback_query.message if update.callback_query else None
     )
@@ -515,7 +496,7 @@ async def cmd_compare(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if not context.args or len(context.args) < 2:
         await msg_obj.reply_text(
-            "❗ שימוש: /compare מניה1 מניה2\nדוגמה: <code>/compare TEVA CHKP</code>",
+            "❗ Usage: /compare TICKER1 TICKER2\nExample: <code>/compare AAPL MSFT</code>",
             parse_mode=ParseMode.HTML,
         )
         return
@@ -524,7 +505,7 @@ async def cmd_compare(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     t2 = context.args[1].upper().strip()
 
     await msg_obj.reply_text(
-        f"⏳ משווה <b>{html.escape(t1)}</b> מול <b>{html.escape(t2)}</b>...",
+        f"⏳ Comparing <b>{html.escape(t1)}</b> vs <b>{html.escape(t2)}</b>...",
         parse_mode=ParseMode.HTML,
     )
 
@@ -539,9 +520,8 @@ async def cmd_compare(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         def _price(sig: object) -> str:
             if isinstance(sig, Exception):
-                return "שגיאה"
-            sym = currency_symbol(sig.ticker)  # type: ignore[union-attr]
-            return f"{sym}{sig.price:,.2f}"  # type: ignore[union-attr]
+                return "Error"
+            return f"${sig.price:,.2f}"  # type: ignore[union-attr]
 
         def _rsi(sig: object) -> str:
             if isinstance(sig, Exception):
@@ -553,7 +533,7 @@ async def cmd_compare(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if isinstance(sig, Exception):
                 return "—"
             h = sig.signals.get("macd_histogram", 0)  # type: ignore[union-attr]
-            return "📈 שורי" if h > 0 else "📉 דובי"
+            return "📈 Bullish" if h > 0 else "📉 Bearish"
 
         def _fib(sig: object) -> str:
             if isinstance(sig, Exception):
@@ -561,48 +541,48 @@ async def cmd_compare(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             fib = sig.fibonacci  # type: ignore[union-attr]
             if not fib:
                 return "—"
-            return "📈 עלייה" if fib["trend"] == "UPTREND" else "📉 ירידה"
+            return "📈 Uptrend" if fib["trend"] == "UPTREND" else "📉 Downtrend"
 
         def _pe(prof: object) -> str:
             if isinstance(prof, Exception):
                 return "—"
             v = getattr(prof, "pe_trailing", None)
-            return f"{v:.1f}" if v else "לא זמין"
+            return f"{v:.1f}x" if v else "N/A"
 
         def _eps(prof: object) -> str:
             if isinstance(prof, Exception):
                 return "—"
             v = getattr(prof, "eps_trailing", None)
-            return f"{v:.2f}" if v else "לא זמין"
+            return f"${v:.2f}" if v else "N/A"
 
         def _cap(prof: object) -> str:
             if isinstance(prof, Exception):
                 return "—"
             cap = getattr(prof, "market_cap", None)
             if not cap:
-                return "לא זמין"
-            return f"{cap / 1e9:.1f}B" if cap >= 1e9 else f"{cap / 1e6:.0f}M"
+                return "N/A"
+            return f"${cap / 1e9:.1f}B" if cap >= 1e9 else f"${cap / 1e6:.0f}M"
 
         rows = [
-            ("💰 מחיר", _price(sig1), _price(sig2)),
+            ("💰 Price", _price(sig1), _price(sig2)),
             ("📉 RSI(14)", _rsi(sig1), _rsi(sig2)),
             ("📊 MACD", _macd(sig1), _macd(sig2)),
-            ("📐 פיבונאצ'י", _fib(sig1), _fib(sig2)),
+            ("📐 Fibonacci", _fib(sig1), _fib(sig2)),
             ("📈 P/E", _pe(prof1), _pe(prof2)),
             ("💵 EPS", _eps(prof1), _eps(prof2)),
-            ("🏦 שווי שוק", _cap(prof1), _cap(prof2)),
+            ("🏦 Market Cap", _cap(prof1), _cap(prof2)),
         ]
 
         lines = [
-            f"⚖️ <b>השוואה: {html.escape(t1)} מול {html.escape(t2)}</b>",
+            f"⚖️ <b>COMPARISON: <code>{html.escape(t1)}</code> vs <code>{html.escape(t2)}</code></b>",
             "━━━━━━━━━━━━━━━━━━━",
-            f"<b>{'מדד':<14} {t1:<12} {t2}</b>",
+            f"<b>{'Metric':<16} {t1:<14} {t2}</b>",
             "─────────────────────────────",
         ]
         for label, v1, v2 in rows:
             lines.append(
-                f"{html.escape(label):<14}  "
-                f"<code>{html.escape(str(v1)):<12}</code>  "
+                f"{html.escape(label):<16}  "
+                f"<code>{html.escape(str(v1)):<14}</code>  "
                 f"<code>{html.escape(str(v2))}</code>"
             )
 
@@ -621,13 +601,13 @@ async def cmd_compare(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception as exc:
         logger.error("compare_command_failed", t1=t1, t2=t2, error=str(exc))
         await msg_obj.reply_text(
-            f"❌ ההשוואה נכשלה: <code>{html.escape(str(exc))}</code>",
+            f"❌ Comparison failed: <code>{html.escape(str(exc))}</code>",
             parse_mode=ParseMode.HTML,
         )
 
 
 async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /health — Hebrew system status dashboard."""
+    """Handle /health — English system status dashboard."""
     from src.database.cache import cache as redis_cache
     from src.database.session import check_db_connection
 
@@ -651,21 +631,68 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             else "⚠️" if h.get("status") == "degraded" else "❌"
         )
 
+    # Test news RSS connectivity
+    import httpx as _httpx
+
+    _browser_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    try:
+        async with _httpx.AsyncClient(
+            timeout=5, headers=_browser_headers, follow_redirects=True
+        ) as client:
+            r = await client.get(
+                "https://news.google.com/rss/search?q=AAPL+stock&hl=en&gl=US&ceid=US:en"
+            )
+        news_rss_status = "✅" if r.status_code == 200 else f"⚠️ HTTP {r.status_code}"
+    except Exception as exc:
+        news_rss_status = f"❌ {str(exc)[:40]}"
+
     mkt = market_status()
-    tase_extra = " (שישי — סגירה 15:45)" if mkt.get("tase_friday") else ""
+    nyse_time = now_us().strftime("%I:%M %p ET")
     lines = [
-        "🏥 <b>סטטוס מערכת — MarketMind-Pro</b>",
+        "🏥 <b>SYSTEM STATUS — MarketMind-Pro</b>",
         "━━━━━━━━━━━━━━━━━━━",
-        f"{_s(quant_health)} מנוע כמותי: {html.escape(quant_health.get('detail', ''))}",
-        f"{_s(news_health)} סוכן חדשות: {html.escape(news_health.get('detail', ''))}",
-        f"{_s(db_health)} PostgreSQL: {html.escape(db_health.get('detail', ''))}",
-        f"{_s(redis_health)} Redis: {html.escape(redis_health.get('detail', ''))}",
+        f"{_s(quant_health)} Quant Engine: {html.escape(quant_health.get('detail', ''))}",
+        f"{_s(news_health)} News Agent:   {html.escape(news_health.get('detail', ''))}",
+        f"{news_rss_status} News RSS:     Google News reachable",
+        f"{_s(db_health)} PostgreSQL:   {html.escape(db_health.get('detail', ''))}",
+        f"{_s(redis_health)} Redis:        {html.escape(redis_health.get('detail', ''))}",
         "━━━━━━━━━━━━━━━━━━━",
-        f"🇺🇸 NYSE: {'🟢 פתוח' if mkt['nyse_open'] else '🔴 סגור'}  ({mkt['us_time']})",
-        f"🇮🇱 ת\"א: {'🟢 פתוח' if mkt['tase_open'] else '🔴 סגור'}  ({mkt['tase_time']}){tase_extra}",
+        f"🇺🇸 NYSE: {'🟢 Open' if mkt['nyse_open'] else '🔴 Closed'}  ({nyse_time})",
     ]
 
     await msg_obj.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+async def cmd_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle unrecognized text messages with a helpful menu."""
+    msg_obj = update.message or (
+        update.callback_query.message if update.callback_query else None
+    )
+    if not msg_obj:
+        return
+
+    keyboard = [
+        [
+            InlineKeyboardButton("📊 Analyze Stock", callback_data="prompt_analyze"),
+            InlineKeyboardButton("📰 News", callback_data="prompt_news"),
+        ],
+        [
+            InlineKeyboardButton("🆚 Compare", callback_data="prompt_compare"),
+            InlineKeyboardButton("📐 Fibonacci", callback_data="prompt_fibonacci"),
+        ],
+        [InlineKeyboardButton("🏥 System Health", callback_data="health")],
+    ]
+    await msg_obj.reply_text(
+        "I didn't recognize that command.\n\nHere's what I can do for you:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.HTML,
+    )
 
 
 # ── Callback Query Handler ──────────────────────────────────────────────────────
@@ -677,7 +704,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await query.answer()
     data = query.data
 
-    update.message = query.message
+    # NOTE: Do NOT assign update.message — Update is immutable in PTB v22.
+    # Sub-handlers resolve the message via:
+    #   msg_obj = update.message or (update.callback_query.message if update.callback_query else None)
 
     if data == "health":
         await cmd_health(update, context)
@@ -690,32 +719,31 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         context.args = [data.split(":", 1)[1]]
         await cmd_fibonacci(update, context)
 
-    elif data.startswith("arb:"):
+    elif data.startswith("news:"):
         context.args = [data.split(":", 1)[1]]
-        await cmd_arbitrage(update, context)
+        await cmd_news(update, context)
 
     elif data == "prompt_analyze":
         await query.message.reply_text(
-            "שלח: /analyze מניה\nדוגמה: <code>/analyze TEVA</code>",
+            "Send: /analyze TICKER\nExample: <code>/analyze AAPL</code>",
+            parse_mode=ParseMode.HTML,
+        )
+
+    elif data == "prompt_news":
+        await query.message.reply_text(
+            "Send: /news TICKER\nExample: <code>/news TSLA</code>",
             parse_mode=ParseMode.HTML,
         )
 
     elif data == "prompt_fibonacci":
         await query.message.reply_text(
-            "שלח: /fibonacci מניה\nדוגמה: <code>/fibonacci AAPL</code>",
-            parse_mode=ParseMode.HTML,
-        )
-
-    elif data == "prompt_arbitrage":
-        tickers = ", ".join(DUAL_LISTED.keys())
-        await query.message.reply_text(
-            f"שלח: /arbitrage מניה\nמניות כפול-רישום: <code>{tickers}</code>",
+            "Send: /fibonacci TICKER\nExample: <code>/fibonacci AAPL</code>",
             parse_mode=ParseMode.HTML,
         )
 
     elif data == "prompt_compare":
         await query.message.reply_text(
-            "שלח: /compare מניה1 מניה2\nדוגמה: <code>/compare TEVA CHKP</code>",
+            "Send: /compare TICKER1 TICKER2\nExample: <code>/compare AAPL MSFT</code>",
             parse_mode=ParseMode.HTML,
         )
 
@@ -727,34 +755,35 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def _job_market_preview(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Scheduled job: Hebrew market preview 30 min before TASE open (09:30 IL, Mon–Fri)."""
-    mkt = market_status()
-    friday_note = (
-        "\n⚠️ <b>יום שישי — סגירה מוקדמת 15:45</b>" if mkt.get("tase_friday") else ""
-    )
-
-    watchlist_preview = ["TEVA", "NICE", "CHKP"]
+    """Scheduled job: pre-market preview 30 min before NYSE open (9:00 AM ET, Mon–Fri)."""
+    watchlist_preview = ["AAPL", "MSFT", "NVDA", "SPY", "QQQ"]
     preview_lines: list[str] = []
     for t in watchlist_preview:
         try:
             sig = await _quant_engine.analyze(t)
             rsi_v = sig.signals.get("rsi")
-            rsi_emoji, _ = _rsi_hebrew(sig.signals.get("rsi_signal", "NEUTRAL"))
-            sym = currency_symbol(t)
+            rsi_emoji, _ = _rsi_label(sig.signals.get("rsi_signal", "NEUTRAL"))
+            # Compute daily % change from ohlcv if available
+            ohlcv = sig.ohlcv or {}
+            close = ohlcv.get("close", sig.price)
+            open_ = ohlcv.get("open", close)
+            pct = (close - open_) / open_ * 100 if open_ else 0.0
+            pct_sign = "+" if pct >= 0 else ""
+            pct_arrow = "📈" if pct > 0.005 else ("📉" if pct < -0.005 else "➡️")
             preview_lines.append(
-                f"  • <b>{t}</b>: <code>{sym}{sig.price:,.2f}</code>  RSI: {rsi_v:.1f} {rsi_emoji}"
-                if rsi_v
-                else f"  • <b>{t}</b>: <code>{sym}{sig.price:,.2f}</code>"
+                f"  • <b>{t}</b>: <code>${sig.price:,.2f}</code>  "
+                f"{pct_arrow} {pct_sign}{pct:.2f}%"
+                + (f"  RSI: {rsi_v:.1f} {rsi_emoji}" if rsi_v else "")
             )
         except Exception:
             preview_lines.append(f"  • <b>{t}</b>: ❌")
 
+    snapshot = await _fetch_market_snapshot()
+    nyse_open_str = now_us().strftime("%I:%M %p ET")
     msg = (
-        '🌅 <b>תצוגה מקדימה לפני פתיחת שוק ת"א</b>\n'
-        f"🕙 {now_tase().strftime('%H:%M')} שעון ישראל — פתיחה בעוד ~30 דקות"
-        + friday_note
-        + "\n\n"
-        "📋 <b>מצב מניות מובילות:</b>\n" + "\n".join(preview_lines)
+        "🌅 <b>Pre-Market Preview — NYSE opens in ~30 minutes</b>\n"
+        f"🕙 {nyse_open_str}\n\n"
+        "📋 <b>Watchlist Status:</b>\n" + "\n".join(preview_lines) + "\n" + snapshot
     )
     await context.bot.send_message(
         chat_id=settings.telegram_chat_id,
@@ -764,12 +793,7 @@ async def _job_market_preview(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _job_market_close_regular(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Scheduled job: end-of-day summary Mon–Thu (17:45 IL time)."""
-    await send_market_close_report(context.application)
-
-
-async def _job_market_close_friday(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Scheduled job: Friday early-close summary (16:05 IL time)."""
+    """Scheduled job: post-close summary (4:15 PM ET, Mon–Fri)."""
     await send_market_close_report(context.application)
 
 
@@ -777,11 +801,11 @@ async def _job_market_close_friday(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def send_market_open_report(app: Application) -> None:
-    """Automated Hebrew morning report at market open."""
-    watchlist = ["TEVA", "NICE", "CHKP", "AAPL", "MSFT", "SPY"]
+    """Automated English morning report at market open."""
+    watchlist = ["AAPL", "MSFT", "NVDA", "GOOGL", "SPY"]
     lines = [
-        "🔔 <b>דוח פתיחת שוק</b>",
-        f"🕐 {datetime.utcnow().strftime('%d/%m/%Y %H:%M')} UTC",
+        "🔔 <b>MARKET OPEN REPORT</b>",
+        f"🕐 {datetime.now(tz=_ET).strftime('%d/%m/%Y %H:%M')} ET",
         "━━━━━━━━━━━━━━━━━━━",
     ]
 
@@ -791,20 +815,28 @@ async def send_market_open_report(app: Application) -> None:
             rsi_val = signal.signals.get("rsi")
             rsi_signal = signal.signals.get("rsi_signal", "NEUTRAL")
             macd_hist = signal.signals.get("macd_histogram", 0)
-            rsi_emoji, _ = _rsi_hebrew(rsi_signal)
-            sym = currency_symbol(ticker)
-            lines.append(
-                f"• <b>{ticker}</b>: <code>{sym}{signal.price:,.2f}</code>  "
-                f"RSI: {rsi_val:.1f} {rsi_emoji}  "
-                f"MACD: {'📈' if macd_hist > 0 else '📉'}"
-                if rsi_val
-                else f"• <b>{ticker}</b>: <code>{sym}{signal.price:,.2f}</code>"
+            rsi_emoji, _ = _rsi_label(rsi_signal)
+            ohlcv = signal.ohlcv or {}
+            close = ohlcv.get("close", signal.price)
+            open_ = ohlcv.get("open", close)
+            pct = (close - open_) / open_ * 100 if open_ else 0.0
+            pct_sign = "+" if pct >= 0 else ""
+            pct_arrow = "📈" if pct > 0.005 else ("📉" if pct < -0.005 else "➡️")
+            line = (
+                f"• <b>{ticker}</b>: <code>${signal.price:,.2f}</code>  "
+                f"{pct_arrow} {pct_sign}{pct:.2f}%"
             )
+            if rsi_val:
+                line += f"  RSI: {rsi_val:.1f} {rsi_emoji}  MACD: {'📈' if macd_hist > 0 else '📉'}"
+            lines.append(line)
         except Exception as exc:
             logger.warning(
                 "market_open_report_ticker_failed", ticker=ticker, error=str(exc)
             )
-            lines.append(f"• <b>{ticker}</b>: ❌ נכשל")
+            lines.append(f"• <b>{ticker}</b>: ❌ Failed")
+
+    snapshot = await _fetch_market_snapshot()
+    lines.append(snapshot)
 
     await app.bot.send_message(
         chat_id=settings.telegram_chat_id,
@@ -814,31 +846,228 @@ async def send_market_open_report(app: Application) -> None:
 
 
 async def send_market_close_report(app: Application) -> None:
-    """Automated end-of-day Hebrew report."""
-    friday_note = " (שישי — סגירה מוקדמת)" if is_friday_session() else ""
-    msg = (
-        "🌙 <b>סיכום סגירת שוק</b>\n"
-        "━━━━━━━━━━━━━━━━━━━\n"
-        f"🇺🇸 סגירת NYSE: {now_us().strftime('%H:%M %Z')}\n"
-        f"🇮🇱 סגירת ת\"א: {now_tase().strftime('%H:%M %Z')}{friday_note}\n\n"
-        "✅ דוח יומי הושלם. בדוק את רשימת המעקב למחר."
-    )
+    """Automated end-of-day English report with watchlist prices and global snapshot."""
+    watchlist = ["AAPL", "MSFT", "NVDA", "GOOGL", "SPY"]
+    nyse_close_str = now_us().strftime("%I:%M %p ET")
+    lines = [
+        "🌙 <b>MARKET CLOSE SUMMARY</b>",
+        "━━━━━━━━━━━━━━━━━━━",
+        f"🇺🇸 NYSE Closed: {nyse_close_str}",
+        "",
+        "📋 <b>End-of-Day Recap:</b>",
+    ]
+
+    for ticker in watchlist:
+        try:
+            signal = await _quant_engine.analyze(ticker)
+            ohlcv = signal.ohlcv or {}
+            close = ohlcv.get("close", signal.price)
+            open_ = ohlcv.get("open", close)
+            pct = (close - open_) / open_ * 100 if open_ else 0.0
+            pct_sign = "+" if pct >= 0 else ""
+            pct_arrow = "📈" if pct > 0.005 else ("📉" if pct < -0.005 else "➡️")
+            lines.append(
+                f"  • <b>{ticker}</b>: <code>${signal.price:,.2f}</code>  "
+                f"{pct_arrow} {pct_sign}{pct:.2f}%"
+            )
+        except Exception:
+            lines.append(f"  • <b>{ticker}</b>: ❌")
+
+    snapshot = await _fetch_market_snapshot()
+    lines.append(snapshot)
+
     await app.bot.send_message(
         chat_id=settings.telegram_chat_id,
-        text=msg,
+        text="\n".join(lines),
         parse_mode=ParseMode.HTML,
     )
+
+
+# ── Market Snapshot ──────────────────────────────────────────────────────────────
+
+_SNAPSHOT_SYMBOLS: list[tuple[str, str, str, bool]] = [
+    # (yfinance_symbol, display_label, emoji, has_dollar_prefix)
+    # Equities / ETFs
+    ("SPY", "S&P 500", "📊", True),
+    ("VOO", "Vanguard S&P", "📊", True),
+    ("QQQ", "Nasdaq", "📊", True),
+    ("DIA", "Dow Jones", "📊", True),
+    ("IWM", "Russell 2000", "📊", True),
+    ("RSP", "S&P EW", "📊", True),
+    # Currency & Volatility
+    ("DX-Y.NYB", "DXY (USD)", "💵", False),
+    ("^VIX", "VIX", "😱", False),
+    # Fixed Income
+    ("TLT", "20Y Treasury", "🏦", True),
+    ("AGG", "Bonds (AGG)", "🏦", True),
+    # Commodities
+    ("GLD", "Gold", "🥇", True),
+    ("SLV", "Silver", "🥈", True),
+    ("USO", "WTI Oil", "🛢️", True),
+    # Crypto
+    ("BTC-USD", "Bitcoin", "₿ ", True),
+    ("ETH-USD", "Ethereum", "Ξ ", True),
+]
+
+_EQUITY_ETFS = {"SPY", "VOO", "QQQ", "DIA", "IWM", "RSP"}
+_CURRENCY_VOL = {"DX-Y.NYB", "^VIX"}
+_FIXED_INCOME = {"TLT", "AGG"}
+_COMMODITY = {"GLD", "SLV", "USO"}
+_CRYPTO = {"BTC-USD", "ETH-USD"}
+
+
+def _snapshot_group(sym: str) -> str:
+    if sym in _EQUITY_ETFS:
+        return "equities"
+    if sym in _CURRENCY_VOL:
+        return "currency"
+    if sym in _FIXED_INCOME:
+        return "bonds"
+    if sym in _COMMODITY:
+        return "commodities"
+    return "crypto"
+
+
+async def _fetch_market_snapshot() -> str:
+    """Fetch major indices, crypto, and commodities with daily % change.
+
+    Returns an HTML-formatted string for inclusion in Telegram messages.
+    Each symbol is fetched independently via yfinance Ticker.history();
+    failures are silently skipped so one bad symbol never blocks the rest.
+    """
+    import yfinance as yf
+
+    loop = asyncio.get_event_loop()
+
+    def _fetch_sync(sym: str) -> tuple[float, float] | None:
+        """Synchronous fetch — runs in thread executor."""
+        try:
+            ticker_obj = yf.Ticker(sym)
+            df = ticker_obj.history(period="5d", interval="1d", auto_adjust=True)
+            df = df.dropna(subset=["Close"])
+            if len(df) < 2:
+                return None
+            prev = float(df["Close"].iloc[-2])
+            curr = float(df["Close"].iloc[-1])
+            return curr, prev
+        except Exception:
+            return None
+
+    # Run all fetches concurrently (each in its own thread to avoid yfinance locks)
+    tasks = [
+        loop.run_in_executor(None, _fetch_sync, sym)
+        for sym, _, _, _ in _SNAPSHOT_SYMBOLS
+    ]
+    results = await asyncio.gather(*tasks)
+
+    lines = ["", "🌍 <b>Global Markets Snapshot</b>"]
+    prev_group: str | None = None
+    for (sym, label, emoji, has_dollar), data in zip(
+        _SNAPSHOT_SYMBOLS, results, strict=True
+    ):
+        # Insert blank line between groups
+        group = _snapshot_group(sym)
+        if prev_group and group != prev_group:
+            lines.append("")
+        prev_group = group
+
+        if data is None:
+            lines.append(f"{emoji} {label}: <code>N/A</code>")
+            continue
+
+        curr, prev = data
+        pct = (curr - prev) / prev * 100 if prev else 0.0
+        pct_arrow = "📈" if pct > 0.005 else ("📉" if pct < -0.005 else "➡️")
+        pct_sign = "+" if pct >= 0 else ""
+
+        # Format value
+        if sym in ("^VIX", "DX-Y.NYB"):
+            val_str = f"{curr:.2f}"
+        elif sym in ("BTC-USD", "ETH-USD"):
+            val_str = f"${curr:,.0f}"
+        else:
+            val_str = f"${curr:,.2f}" if has_dollar else f"{curr:.2f}"
+
+        lines.append(
+            f"{emoji} {label}: <code>{val_str}</code>  {pct_arrow} {pct_sign}{pct:.2f}%"
+        )
+
+    return "\n".join(lines)
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────────
 
 
-def _rsi_hebrew(signal: str) -> tuple[str, str]:
-    """Return (emoji, Hebrew label) for RSI signal."""
+def _format_news_block(ticker: str, sentiment: object) -> list[str]:
+    """Return HTML lines for the institutional news block.
+
+    Format per item:
+        • <b><a href="URL">Headline</a></b>
+        Summary sentence (plain text).
+        <code>[Source]</code> | <code>2h ago</code>
+    """
+    # Import here to avoid circular — SentimentReport is from news_search_agent
+    bar = _sentiment_bar(sentiment.score)  # type: ignore[attr-defined]
+    lines = [
+        f"📰 <b>Latest Market News &amp; Sentiment — <code>{html.escape(ticker)}</code></b>",
+        "━━━━━━━━━━━━━━━━━━━",
+        f"{sentiment.emoji} <b>Sentiment:</b> <code>{sentiment.score:+.2f}</code>  {bar}",  # type: ignore[attr-defined]
+        "━━━━━━━━━━━━━━━━━━━",
+        "",
+    ]
+
+    headlines = sentiment.recent_headlines  # type: ignore[attr-defined]
+    if not headlines:
+        lines.append("ℹ️ No recent headlines found.")
+        return lines
+
+    for item in headlines[:5]:
+        title = item.get("title", "")
+        snippet = item.get("snippet", "")
+        url_item = item.get("url", "")
+        src = item.get("source", "")
+        time_ago = item.get("time_ago", "")
+
+        # High-impact keyword detector (🚨 alert)
+        alert = ""
+        if any(
+            kw in title.lower()
+            for kw in ("earnings", "acquisition", "merger", "fda", "deal", "buyout")
+        ):
+            alert = "🚨 "
+
+        # Headline line — clickable if URL present
+        if url_item:
+            lines.append(
+                f'• {alert}<b><a href="{url_item}">{html.escape(title)}</a></b>'
+            )
+        else:
+            lines.append(f"• {alert}<b>{html.escape(title)}</b>")
+
+        # Snippet (1-2 sentences)
+        if snippet:
+            lines.append(html.escape(snippet[:160]))
+
+        # Meta: source + time
+        meta_parts = []
+        if src:
+            meta_parts.append(f"<code>[{html.escape(src)}]</code>")
+        if time_ago:
+            meta_parts.append(f"<code>{html.escape(time_ago)}</code>")
+        if meta_parts:
+            lines.append(" | ".join(meta_parts))
+
+        lines.append("")
+
+    return lines
+
+
+def _rsi_label(signal: str) -> tuple[str, str]:
+    """Return (emoji, English label) for RSI signal."""
     return {
-        "OVERSOLD": ("🟢", "מכור יתר — אות קנייה"),
-        "OVERBOUGHT": ("🔴", "קנוי יתר — אות מכירה"),
-        "NEUTRAL": ("⚪", "נייטרלי"),
+        "OVERSOLD": ("🟢", "Oversold — Buy Signal"),
+        "OVERBOUGHT": ("🔴", "Overbought — Sell Signal"),
+        "NEUTRAL": ("⚪", "Neutral"),
     }.get(signal, ("⚪", signal))
 
 
@@ -854,43 +1083,38 @@ def _sentiment_bar(score: float) -> str:
 def build_application() -> Application:
     """Build and configure the Telegram bot application with scheduled jobs."""
     if not settings.telegram_token:
-        raise ValueError("TELEGRAM_TOKEN לא הוגדר ב-.env")
+        raise ValueError("TELEGRAM_TOKEN not set in .env")
 
     app = Application.builder().token(settings.telegram_token).build()
 
     # ── Command handlers ──────────────────────────────────────────────
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("analyze", cmd_analyze))
+    app.add_handler(CommandHandler("news", cmd_news))
     app.add_handler(CommandHandler("fibonacci", cmd_fibonacci))
-    app.add_handler(CommandHandler("arbitrage", cmd_arbitrage))
     app.add_handler(CommandHandler("compare", cmd_compare))
     app.add_handler(CommandHandler("health", cmd_health))
     app.add_handler(CallbackQueryHandler(callback_handler))
+    # Fallback handler must be LAST — catches all unrecognized text messages
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cmd_fallback))
 
     # ── Scheduled jobs via JobQueue (APScheduler under the hood) ─────
-    tz_il = pytz.timezone("Asia/Jerusalem")
+    tz_us = pytz.timezone("America/New_York")
     jq = app.job_queue
     if jq is not None:
-        # 09:30 IL — pre-open preview, Mon–Fri
+        # 9:00 AM ET — pre-open preview, Mon–Fri
         jq.run_daily(
             _job_market_preview,
-            time=dt_time(9, 30, tzinfo=tz_il),
+            time=dt_time(9, 0, tzinfo=tz_us),
             days=(0, 1, 2, 3, 4),
-            name="tase_preview",
+            name="nyse_preview",
         )
-        # 17:45 IL — post-close summary, Mon–Thu
+        # 4:15 PM ET — post-close summary, Mon–Fri
         jq.run_daily(
             _job_market_close_regular,
-            time=dt_time(17, 45, tzinfo=tz_il),
-            days=(0, 1, 2, 3),
-            name="tase_close_regular",
-        )
-        # 16:05 IL — Friday early-close summary
-        jq.run_daily(
-            _job_market_close_friday,
-            time=dt_time(16, 5, tzinfo=tz_il),
-            days=(4,),
-            name="tase_close_friday",
+            time=dt_time(16, 15, tzinfo=tz_us),
+            days=(0, 1, 2, 3, 4),
+            name="nyse_close",
         )
 
     return app
@@ -925,5 +1149,5 @@ class TelegramDispatcher:
     async def health_check(self) -> dict[str, str]:
         """Return bot health status."""
         if self.app and self.app.running:
-            return {"status": "ok", "detail": "Telegram bot פעיל"}
-        return {"status": "error", "detail": "Bot לא פועל"}
+            return {"status": "ok", "detail": "Telegram bot running"}
+        return {"status": "error", "detail": "Bot not running"}

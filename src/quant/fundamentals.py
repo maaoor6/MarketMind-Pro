@@ -14,7 +14,7 @@ from src.database.cache import cache
 from src.database.models import InsiderTransaction
 from src.database.session import AsyncSessionLocal
 from src.utils.logger import get_logger
-from src.utils.timezone_utils import TZ_UTC, currency_symbol
+from src.utils.timezone_utils import TZ_UTC
 
 logger = get_logger(__name__)
 
@@ -66,6 +66,8 @@ class CompanyProfile:
     week_52_high: float | None
     week_52_low: float | None
     currency: str  # 'USD' or 'ILS'
+    employees: int | None = None
+    exchange: str = "N/A"
 
 
 @dataclass
@@ -129,6 +131,17 @@ async def fetch_company_profile(ticker: str) -> CompanyProfile:
         except (TypeError, ValueError):
             return None
 
+    exchange_map = {
+        "NYQ": "NYSE",
+        "NYSEArca": "NYSE Arca",
+        "NMS": "NASDAQ",
+        "NGM": "NASDAQ",
+        "NCM": "NASDAQ",
+    }
+    exchange = (
+        exchange_map.get(info.get("exchange", ""), info.get("exchange", "N/A")) or "N/A"
+    )
+
     profile = CompanyProfile(
         ticker=ticker.upper(),
         name=info.get("longName") or info.get("shortName") or ticker.upper(),
@@ -145,6 +158,8 @@ async def fetch_company_profile(ticker: str) -> CompanyProfile:
         week_52_high=_float("fiftyTwoWeekHigh"),
         week_52_low=_float("fiftyTwoWeekLow"),
         currency="ILS" if ticker.upper().endswith(".TA") else "USD",
+        employees=_int("fullTimeEmployees"),
+        exchange=exchange,
     )
 
     await cache.set(cache_key, dataclasses.asdict(profile), ttl=FUNDAMENTALS_CACHE_TTL)
@@ -307,7 +322,7 @@ def get_competitors(ticker: str) -> list[str]:
 def _fmt_cap(cap: int | None) -> str:
     """Format market cap as human-readable string."""
     if cap is None:
-        return "לא זמין"
+        return "N/A"
     if cap >= 1_000_000_000:
         return f"${cap / 1e9:.1f}B"
     if cap >= 1_000_000:
@@ -316,24 +331,24 @@ def _fmt_cap(cap: int | None) -> str:
 
 
 def _fmt_float(val: float | None, suffix: str = "", precision: int = 2) -> str:
-    """Format a float value or return 'לא זמין'."""
+    """Format a float value or return 'N/A'."""
     if val is None:
-        return "לא זמין"
+        return "N/A"
     return f"{val:.{precision}f}{suffix}"
 
 
 def _fmt_pct(val: float | None) -> str:
     """Format a decimal dividend yield as percentage string."""
     if val is None:
-        return "לא זמין"
+        return "N/A"
     return f"{val * 100:.2f}%"
 
 
-# ── Hebrew formatters ─────────────────────────────────────────────────────────
+# ── English formatters ────────────────────────────────────────────────────────
 
 
-def format_profile_hebrew(profile: CompanyProfile) -> str:
-    """Format a CompanyProfile as a Hebrew HTML string for Telegram.
+def format_profile_english(profile: CompanyProfile) -> str:
+    """Format a CompanyProfile as an English HTML string for Telegram.
 
     Args:
         profile: CompanyProfile dataclass.
@@ -341,39 +356,48 @@ def format_profile_hebrew(profile: CompanyProfile) -> str:
     Returns:
         HTML-formatted string.
     """
-    sym = currency_symbol(profile.ticker)
     summary_short = (
-        (profile.summary[:220] + "...")
-        if len(profile.summary) > 220
+        (profile.summary[:400] + "...")
+        if len(profile.summary) > 400
         else profile.summary
     )
     competitors = get_competitors(profile.ticker)
-    comp_str = ", ".join(competitors) if competitors else "לא זמין"
+    comp_str = ", ".join(competitors) if competitors else "N/A"
+    emp_str = f"👥 {profile.employees:,} employees" if profile.employees else ""
+    sector_line = " | ".join(
+        filter(
+            None, [html.escape(profile.sector), html.escape(profile.industry), emp_str]
+        )
+    )
 
     lines = [
-        f"🏢 <b>{html.escape(profile.name)}</b> ({html.escape(profile.ticker)})",
-        f"🏭 <b>תחום:</b> {html.escape(profile.sector)} | {html.escape(profile.industry)}",
-        f"💰 <b>שווי שוק:</b> {_fmt_cap(profile.market_cap)}",
+        f"🏢 <b>{html.escape(profile.name)}</b> (<code>{html.escape(profile.ticker)}</code>) — {html.escape(profile.exchange)}",
+        f"🏭 {sector_line}" if sector_line else "",
+        f"💰 Market Cap: <code>{_fmt_cap(profile.market_cap)}</code>",
         "",
-        "📊 <b>מכפילים ומדדים:</b>",
-        f"  מכפיל רווח (P/E) נוכחי: <code>{_fmt_float(profile.pe_trailing, precision=1)}</code>",
-        f"  מכפיל רווח (P/E) צפוי:  <code>{_fmt_float(profile.pe_forward, precision=1)}</code>",
-        f"  EPS נוכחי:  <code>{sym}{_fmt_float(profile.eps_trailing)}</code>",
-        f"  EPS צפוי:   <code>{sym}{_fmt_float(profile.eps_forward)}</code>",
-        f"  תשואת דיבידנד: <code>{_fmt_pct(profile.dividend_yield)}</code>",
-        f"  🎯 יעד אנליסטים: <code>{sym}{_fmt_float(profile.target_price_mean)}</code>",
+        "📊 <b>Valuation Metrics:</b>",
+        f"  P/E (Trailing): <code>{_fmt_float(profile.pe_trailing, 'x', 1)}</code>    P/E (Forward): <code>{_fmt_float(profile.pe_forward, 'x', 1)}</code>",
+        f"  EPS (Trailing): <code>${_fmt_float(profile.eps_trailing)}</code>    EPS (Forward):  <code>${_fmt_float(profile.eps_forward)}</code>",
+        f"  Dividend Yield: <code>{_fmt_pct(profile.dividend_yield)}</code>",
+        f"  🎯 Analyst Target: <code>${_fmt_float(profile.target_price_mean)}</code>",
         "",
-        f"📈 <b>טווח 52 שבועות:</b> <code>{sym}{_fmt_float(profile.week_52_low)}</code> – <code>{sym}{_fmt_float(profile.week_52_high)}</code>",
-        f"🆚 <b>מתחרים עיקריים:</b> {html.escape(comp_str)}",
+        f"📈 52-Week Range: <code>${_fmt_float(profile.week_52_low)}</code> – <code>${_fmt_float(profile.week_52_high)}</code>",
+        f"🆚 Competitors: {html.escape(comp_str)}",
     ]
+    # Filter out empty lines at start
+    lines = [line for line in lines if line is not None]
     if summary_short:
         lines += ["", f"📝 <i>{html.escape(summary_short)}</i>"]
 
     return "\n".join(lines)
 
 
-def format_insiders_hebrew(ticker: str, txns: list[InsiderTx]) -> str:
-    """Format insider transactions as a Hebrew HTML string for Telegram.
+# Keep old name as alias for backwards compatibility during transition
+format_profile_hebrew = format_profile_english
+
+
+def format_insiders_english(ticker: str, txns: list[InsiderTx]) -> str:
+    """Format insider transactions as an English HTML string for Telegram.
 
     Args:
         ticker: Ticker symbol.
@@ -383,27 +407,28 @@ def format_insiders_hebrew(ticker: str, txns: list[InsiderTx]) -> str:
         HTML-formatted string showing up to 5 most recent transactions.
     """
     if not txns:
-        return (
-            f"🕵️ <b>עסקאות בעלי עניין — {html.escape(ticker)}</b>\nאין נתונים זמינים."
-        )
+        return f"🕵️ <b>Insider Transactions — {html.escape(ticker)}</b>\nNo data available."
 
-    sym = currency_symbol(ticker)
     lines = [
-        f"🕵️ <b>עסקאות בעלי עניין — {html.escape(ticker)}</b>",
+        f"🕵️ <b>Insider Transactions — {html.escape(ticker)}</b>",
         "━━━━━━━━━━━━━━━━━━━",
     ]
 
     for tx in txns[:5]:
-        type_emoji = "🟢 קנייה" if tx.transaction_type == "BUY" else "🔴 מכירה"
+        type_emoji = "🟢 BUY" if tx.transaction_type == "BUY" else "🔴 SELL"
         date_str = tx.transaction_date.strftime("%d/%m/%Y")
         shares_str = f"{tx.shares:,}"
-        price_str = f"{sym}{tx.price_per_share:.2f}" if tx.price_per_share else "N/A"
-        value_str = f"{sym}{tx.total_value:,.0f}" if tx.total_value else "N/A"
+        price_str = f"${tx.price_per_share:.2f}" if tx.price_per_share else "N/A"
+        value_str = f"${tx.total_value:,.0f}" if tx.total_value else "N/A"
         title_str = html.escape(tx.insider_title) if tx.insider_title else "—"
 
         lines += [
             f"• {type_emoji} — <b>{html.escape(tx.insider_name)}</b> ({title_str})",
-            f'  {date_str}: {shares_str} מניות @ {price_str}  |  סה"כ: {value_str}',
+            f"  {date_str}: {shares_str} shares @ {price_str}  |  Total: {value_str}",
         ]
 
     return "\n".join(lines)
+
+
+# Keep old name as alias for backwards compatibility during transition
+format_insiders_hebrew = format_insiders_english

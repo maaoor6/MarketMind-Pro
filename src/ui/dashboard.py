@@ -4,7 +4,6 @@ Run with:
     streamlit run src/ui/dashboard.py
 """
 
-import asyncio
 from datetime import datetime
 
 import pandas as pd
@@ -13,7 +12,6 @@ import streamlit as st
 import yfinance as yf
 from plotly.subplots import make_subplots
 
-from src.quant.arbitrage import DUAL_LISTED, calculate_arbitrage
 from src.quant.fibonacci import calculate_fibonacci
 from src.quant.indicators import all_moving_averages, generate_signals, rsi
 
@@ -29,13 +27,13 @@ st.set_page_config(
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 
 st.sidebar.title("MarketMind-Pro")
-st.sidebar.caption("TASE & US Market Intelligence")
+st.sidebar.caption("US Market Intelligence")
 
 ticker_input = (
     st.sidebar.text_input(
         "Ticker Symbol",
-        value="TEVA",
-        placeholder="e.g. AAPL, TEVA, MSFT",
+        value="AAPL",
+        placeholder="e.g. AAPL, MSFT, NVDA",
     )
     .upper()
     .strip()
@@ -63,10 +61,6 @@ show_ma = st.sidebar.multiselect(
 )
 
 show_fibonacci = st.sidebar.checkbox("Show Fibonacci Levels", value=True)
-show_arbitrage = st.sidebar.checkbox(
-    "Arbitrage Analysis",
-    value=ticker_input in DUAL_LISTED,
-)
 
 analyze_btn = st.sidebar.button("Analyze", type="primary", use_container_width=True)
 
@@ -342,55 +336,6 @@ if show_fibonacci and fib_levels:
             st.success(f"Nearest Support: **${fib_levels.nearest_support:,.2f}**")
         if fib_levels.nearest_resistance:
             st.error(f"Nearest Resistance: **${fib_levels.nearest_resistance:,.2f}**")
-
-# ── Arbitrage ──────────────────────────────────────────────────────────────────
-
-if show_arbitrage:
-    st.subheader(f"Arbitrage Analysis — {ticker_input}")
-
-    if ticker_input not in DUAL_LISTED:
-        st.warning(
-            f"**{ticker_input}** is not in the dual-listed watchlist. "
-            f"Tracked tickers: {', '.join(DUAL_LISTED.keys())}"
-        )
-    else:
-        tase_ticker = DUAL_LISTED[ticker_input]
-        with st.spinner(f"Fetching TASE price for {tase_ticker}..."):
-            df_tase = fetch_data(tase_ticker, "5d")
-
-        if df_tase.empty:
-            st.error(f"Could not fetch TASE data for {tase_ticker}.")
-        else:
-            price_tase_ils = float(df_tase["Close"].iloc[-1])
-            price_us_usd = latest_close
-
-            arb = asyncio.run(
-                calculate_arbitrage(
-                    ticker_us=ticker_input,
-                    price_us_usd=price_us_usd,
-                    price_tase_ils=price_tase_ils,
-                )
-            )
-
-            arb_col1, arb_col2, arb_col3, arb_col4 = st.columns(4)
-            arb_col1.metric("US Price (USD)", f"${arb.price_us_usd:,.3f}")
-            arb_col2.metric("TASE Price (ILS)", f"₪{arb.price_tase_ils:,.3f}")
-            arb_col3.metric("TASE in USD", f"${arb.price_tase_in_usd:,.3f}")
-            arb_col4.metric(
-                "Gap",
-                f"{arb.gap_pct:.2f}%",
-                arb.gap_direction.replace("_", " "),
-                delta_color="off",
-            )
-
-            arb_col1.metric("USD/ILS Rate", f"{arb.usd_ils_rate:.4f}")
-
-            if arb.is_opportunity:
-                st.success(f"ARBITRAGE OPPORTUNITY DETECTED — {arb.gap_pct:.2f}% gap")
-            else:
-                st.info(
-                    f"No significant arbitrage (gap {arb.gap_pct:.2f}% < 0.5% threshold)"
-                )
 
 # ── Footer ─────────────────────────────────────────────────────────────────────
 

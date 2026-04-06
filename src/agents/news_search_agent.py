@@ -1,10 +1,14 @@
-"""News Search Agent — Google Search MCP-powered sentiment scanner."""
+"""News Search Agent — multi-source news sentiment with Google News RSS fallback."""
 
 import asyncio
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from xml.etree.ElementTree import ParseError as XMLParseError
 
 import httpx
+from defusedxml.ElementTree import fromstring as safe_fromstring
 
 from src.database.cache import cache
 from src.utils.config import settings
@@ -13,15 +17,28 @@ from src.utils.timezone_utils import now_utc
 
 logger = get_logger(__name__)
 
-# News sources to scan (Hebrew + English financial media)
-NEWS_SOURCES = {
-    "he": ["globes.co.il", "bizportal.co.il", "calcalist.co.il", "themarker.com"],
-    "en": ["cnbc.com", "reuters.com", "bloomberg.com", "marketwatch.com"],
+# Professional browser headers to avoid 403/429 from financial news sites
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
-# Hebrew sentiment keywords
-POSITIVE_HE = ["עלייה", "רווח", "צמיחה", "חיובי", "שיא", "תשואה", "ביקוש"]
-NEGATIVE_HE = ["ירידה", "הפסד", "משבר", "שלילי", "תשקיף", "קנס", "חקירה"]
+# Google News RSS — returns results from Bloomberg, Reuters, CNBC, etc.
+# Free, no API key required, reliably multi-source.
+_GOOGLE_NEWS_RSS = (
+    "https://news.google.com/rss/search" "?q={ticker}+stock+news&hl=en&gl=US&ceid=US:en"
+)
+
+# Yahoo Finance headline RSS (ticker-specific, official)
+_YAHOO_FINANCE_RSS = (
+    "https://feeds.finance.yahoo.com/rss/2.0/headline"
+    "?s={ticker}&region=US&lang=en-US"
+)
 
 # English sentiment keywords
 POSITIVE_EN = [
@@ -46,6 +63,80 @@ NEGATIVE_EN = [
 ]
 
 
+def _time_ago(pub_date_str: str) -> str:
+    """Convert an RFC 2822 pubDate string to a human-readable 'X hours ago' string."""
+    try:
+        pub_dt = parsedate_to_datetime(pub_date_str)
+        if pub_dt.tzinfo is None:
+            pub_dt = pub_dt.replace(tzinfo=UTC)
+        now = datetime.now(tz=UTC)
+        delta = now - pub_dt
+        total_seconds = int(delta.total_seconds())
+        if total_seconds < 60:
+            return "just now"
+        if total_seconds < 3600:
+            m = total_seconds // 60
+            return f"{m}m ago"
+        if total_seconds < 86400:
+            h = total_seconds // 3600
+            return f"{h}h ago"
+        d = total_seconds // 86400
+        return f"{d}d ago"
+    except Exception:
+        return ""
+
+
+def _strip_html(text: str) -> str:
+    """Remove HTML tags from a string."""
+    return re.sub(r"<[^>]+>", "", text).strip()
+
+
+def _parse_rss(xml_text: str, fallback_source: str, max_items: int = 8) -> list[dict]:
+    """Parse an RSS XML string and return normalised article dicts.
+
+    Handles both standard RSS and Google News RSS format (which puts the real
+    source name in a <source> child element of each <item>).
+    """
+    try:
+        root = safe_fromstring(xml_text)
+    except XMLParseError:
+        return []
+
+    results = []
+    for item in root.findall(".//item")[:max_items]:
+        title_raw = item.findtext("title") or ""
+        link = item.findtext("link") or ""
+        description = _strip_html(item.findtext("description") or "")[:200]
+        pub_date = item.findtext("pubDate") or ""
+
+        # Google News puts the real publisher in <source>; strip it from title
+        source_el = item.find("source")
+        if source_el is not None and source_el.text:
+            source_name = source_el.text.strip()
+            # Google News appends " - Source" to the title; remove it
+            title = re.sub(
+                rf"\s*[-–]\s*{re.escape(source_name)}\s*$", "", title_raw
+            ).strip()
+        else:
+            source_name = fallback_source
+            title = title_raw.strip()
+
+        if not title:
+            continue
+
+        results.append(
+            {
+                "title": title,
+                "url": link.strip(),
+                "snippet": description,
+                "source": source_name,
+                "published_at": pub_date,
+                "time_ago": _time_ago(pub_date) if pub_date else "",
+            }
+        )
+    return results
+
+
 @dataclass
 class SentimentReport:
     ticker: str
@@ -53,11 +144,11 @@ class SentimentReport:
     score: float  # -1.0 (very negative) to +1.0 (very positive)
     headline_count: int
     sources: list[str] = field(default_factory=list)
-    headlines_he: list[str] = field(default_factory=list)
-    headlines_en: list[str] = field(default_factory=list)
-    summary_he: str = ""
-    summary_en: str = ""
-    recent_headlines: list[dict] = field(default_factory=list)
+    headlines: list[str] = field(default_factory=list)
+    summary: str = ""
+    recent_headlines: list[dict] = field(
+        default_factory=list
+    )  # {title, snippet, url, source, time_ago}
     emoji: str = "⚪"
 
     def __post_init__(self) -> None:
@@ -70,19 +161,23 @@ class SentimentReport:
 
 
 class NewsSearchAgent:
-    """Autonomous agent for news sentiment analysis via Google Search MCP."""
+    """Autonomous agent for news sentiment analysis.
+
+    Priority:
+    1. Google Search MCP (if running on port 8001)
+    2. Google Custom Search API (if GOOGLE_API_KEY configured)
+    3. Google News RSS + Yahoo Finance RSS (free, no API key needed)
+    """
 
     def __init__(self) -> None:
         self._mcp_base_url = f"http://localhost:{settings.google_search_mcp_port}"
 
-    async def _search_google_mcp(self, query: str, num_results: int = 10) -> list[dict]:
-        """Call Google Search MCP server to get search results.
+    # ── Primary: Google Search MCP ───────────────────────────────────────────
 
-        Falls back to direct Google Custom Search API if MCP unavailable.
-        """
-        # Try MCP server first
+    async def _search_google_mcp(self, query: str, num_results: int = 10) -> list[dict]:
+        """Call Google Search MCP server. Returns [] on any failure."""
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=15, headers=_HEADERS) as client:
                 response = await client.post(
                     f"{self._mcp_base_url}/tools/search_web",
                     json={"query": query, "num_results": num_results},
@@ -90,29 +185,23 @@ class NewsSearchAgent:
                 response.raise_for_status()
                 return response.json().get("results", [])
         except httpx.ConnectError:
-            logger.warning("mcp_unavailable_using_fallback", query=query)
-
-        # Fallback: Google Custom Search JSON API
-        return await self._google_custom_search_fallback(query, num_results)
+            logger.warning("mcp_unavailable", query=query)
+        except Exception as exc:
+            logger.warning("mcp_error", query=query, error=str(exc))
+        return []
 
     async def _google_custom_search_fallback(
         self, query: str, num_results: int = 10
     ) -> list[dict]:
-        """Direct Google Custom Search API call."""
+        """Direct Google Custom Search API call. Returns [] if not configured."""
         api_key = settings.google_api_key
         cx = settings.google_search_engine_id
         if not api_key or not cx:
-            logger.warning("no_google_api_credentials")
             return []
 
         url = "https://www.googleapis.com/customsearch/v1"
-        params = {
-            "key": api_key,
-            "cx": cx,
-            "q": query,
-            "num": min(num_results, 10),
-        }
-        async with httpx.AsyncClient(timeout=15) as client:
+        params = {"key": api_key, "cx": cx, "q": query, "num": min(num_results, 10)}
+        async with httpx.AsyncClient(timeout=15, headers=_HEADERS) as client:
             try:
                 response = await client.get(url, params=params)
                 response.raise_for_status()
@@ -122,6 +211,8 @@ class NewsSearchAgent:
                         "title": item.get("title", ""),
                         "url": item.get("link", ""),
                         "snippet": item.get("snippet", ""),
+                        "source": item.get("displayLink", ""),
+                        "time_ago": "",
                     }
                     for item in items
                 ]
@@ -129,36 +220,88 @@ class NewsSearchAgent:
                 logger.error("google_search_failed", error=str(exc))
                 return []
 
+    # ── RSS fetching ──────────────────────────────────────────────────────────
+
+    async def _fetch_rss(
+        self, url: str, fallback_source: str, max_items: int = 8
+    ) -> list[dict]:
+        """Fetch and parse one RSS feed. Returns [] on any error."""
+        try:
+            async with httpx.AsyncClient(
+                timeout=12, headers=_HEADERS, follow_redirects=True
+            ) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                results = _parse_rss(resp.text, fallback_source, max_items)
+                logger.debug("rss_fetched", source=fallback_source, count=len(results))
+                return results
+        except Exception as exc:
+            logger.debug("rss_fetch_failed", source=fallback_source, error=str(exc))
+            return []
+
+    async def _fetch_rss_for_ticker(self, ticker: str) -> list[dict]:
+        """Fetch Google News RSS + Yahoo Finance RSS in parallel for a ticker.
+
+        Google News RSS aggregates results from Bloomberg, Reuters, CNBC, WSJ, etc.
+        Each article includes the real publisher name from the <source> element.
+        Results are deduplicated by title; max 2 per source domain for diversity.
+        """
+        ticker_upper = ticker.upper()
+        google_url = _GOOGLE_NEWS_RSS.format(ticker=ticker_upper)
+        yahoo_url = _YAHOO_FINANCE_RSS.format(ticker=ticker_upper)
+
+        google_results, yahoo_results = await asyncio.gather(
+            self._fetch_rss(google_url, "Google News", max_items=10),
+            self._fetch_rss(yahoo_url, "Yahoo Finance", max_items=5),
+        )
+
+        all_items = google_results + yahoo_results
+        seen_titles: set[str] = set()
+        source_counts: dict[str, int] = {}
+        merged: list[dict] = []
+
+        for item in all_items:
+            title = item.get("title", "")
+            if not title or title in seen_titles:
+                continue
+            source = item.get("source", "")
+            if source_counts.get(source, 0) >= 2:
+                continue
+            seen_titles.add(title)
+            source_counts[source] = source_counts.get(source, 0) + 1
+            merged.append(item)
+
+        logger.info(
+            "rss_fetch_complete",
+            ticker=ticker,
+            count=len(merged),
+            sources=list(source_counts.keys()),
+        )
+        return merged
+
+    # ── Sentiment scoring ─────────────────────────────────────────────────────
+
     def _score_headline(self, text: str) -> float:
         """Score a headline from -1.0 to +1.0 based on keyword matching."""
         text_lower = text.lower()
         score = 0.0
         total = 0
-
-        for kw in POSITIVE_EN + POSITIVE_HE:
+        for kw in POSITIVE_EN:
             if kw.lower() in text_lower:
                 score += 1
                 total += 1
-
-        for kw in NEGATIVE_EN + NEGATIVE_HE:
+        for kw in NEGATIVE_EN:
             if kw.lower() in text_lower:
                 score -= 1
                 total += 1
-
         if total == 0:
             return 0.0
         return max(-1.0, min(1.0, score / total))
 
+    # ── Main analysis ─────────────────────────────────────────────────────────
+
     async def analyze_sentiment(self, ticker: str) -> SentimentReport:
-        """Scan news sources and compute sentiment for a ticker.
-
-        Args:
-            ticker: Stock ticker (e.g., 'TEVA', 'AAPL').
-
-        Returns:
-            SentimentReport with score, headlines, and summaries.
-        """
-        # Check cache first
+        """Scan news sources and compute sentiment for a ticker."""
         cached = await cache.get_news_sentiment(ticker)
         if cached:
             logger.debug("sentiment_cache_hit", ticker=ticker)
@@ -166,94 +309,103 @@ class NewsSearchAgent:
 
         logger.info("sentiment_analysis_start", ticker=ticker)
 
-        # Build search queries
-        queries = [
-            f"{ticker} stock news today",
-            f"{ticker} מניה חדשות",  # Hebrew
-            f"site:globes.co.il {ticker}",
-            f"site:bizportal.co.il {ticker}",
-            f"site:cnbc.com {ticker}",
-            f"site:reuters.com {ticker}",
-        ]
-
         all_results: list[dict] = []
-        for query in queries:
-            results = await self._search_google_mcp(query, num_results=5)
-            all_results.extend(results)
-            await asyncio.sleep(0.5)  # Respect rate limits
+
+        # Try Google MCP first
+        mcp_results = await self._search_google_mcp(
+            f"{ticker} stock news today", num_results=10
+        )
+        if not mcp_results:
+            mcp_results = await self._google_custom_search_fallback(
+                f"{ticker} stock news", num_results=10
+            )
+
+        if mcp_results:
+            all_results.extend(mcp_results)
+        else:
+            logger.info("using_rss_fallback", ticker=ticker)
+            all_results = await self._fetch_rss_for_ticker(ticker)
 
         if not all_results:
             logger.warning("no_news_results", ticker=ticker)
-            report = SentimentReport(
+            return SentimentReport(
                 ticker=ticker,
                 timestamp=now_utc().isoformat(),
                 score=0.0,
                 headline_count=0,
-                summary_en="No news found.",
+                summary="No news found.",
             )
-            return report
 
         # Deduplicate
-        seen_titles: set[str] = set()
-        unique_results = []
+        seen: set[str] = set()
+        unique_results: list[dict] = []
         for r in all_results:
-            title = r.get("title", "")
-            if title and title not in seen_titles:
-                seen_titles.add(title)
+            t = r.get("title", "")
+            if t and t not in seen:
+                seen.add(t)
                 unique_results.append(r)
 
-        # Classify Hebrew vs English headlines
-        headlines_he = []
-        headlines_en = []
-        sources = set()
+        headlines = []
+        sources: set[str] = set()
         scores = []
 
         for result in unique_results:
             title = result.get("title", "")
-            url = result.get("url", "")
             snippet = result.get("snippet", "")
-            combined_text = f"{title} {snippet}"
-
-            # Hebrew detection: contains Hebrew characters
-            is_hebrew = bool(re.search(r"[\u0590-\u05FF]", combined_text))
-            if is_hebrew:
-                headlines_he.append(title)
-            else:
-                headlines_en.append(title)
-
-            scores.append(self._score_headline(combined_text))
+            url = result.get("url", "")
+            headlines.append(title)
+            scores.append(self._score_headline(f"{title} {snippet}"))
             domain = url.split("/")[2] if url.count("/") >= 2 else url
             sources.add(domain)
 
         avg_score = sum(scores) / len(scores) if scores else 0.0
-
-        # Build summary strings
         pos_count = sum(1 for s in scores if s > 0)
         neg_count = sum(1 for s in scores if s < 0)
         neu_count = len(scores) - pos_count - neg_count
 
-        summary_en = (
+        summary = (
             f"{ticker} sentiment: {pos_count} positive, {neg_count} negative, "
             f"{neu_count} neutral across {len(unique_results)} articles."
         )
-        summary_he = (
-            f"סנטימנט {ticker}: {pos_count} חיובי, {neg_count} שלילי, "
-            f"{neu_count} ניטרלי מתוך {len(unique_results)} כתבות."
-        )
 
-        # Top 3 recent headlines with source info for display
-        top3 = [
-            {
-                "title": r.get("title", ""),
-                "snippet": r.get("snippet", "")[:120],
-                "source": (
-                    r.get("url", "").split("/")[2]
-                    if r.get("url", "").count("/") >= 2
-                    else r.get("url", "")
-                ),
-            }
-            for r in unique_results[:3]
-        ]
+        # Sort by publication date (newest first) before picking top 5
+        def _pub_ts(r: dict) -> float:
+            try:
+                from email.utils import parsedate_to_datetime
+
+                return parsedate_to_datetime(r["published_at"]).timestamp()
+            except Exception:
+                return 0.0
+
+        unique_results.sort(key=_pub_ts, reverse=True)
+
+        # Filter out articles older than 48 hours
+        now_ts = datetime.now(tz=UTC).timestamp()
+        fresh_results = [
+            r
+            for r in unique_results
+            if now_ts - _pub_ts(r) <= 172800  # 48 hours in seconds
+        ] or unique_results  # fall back to all if nothing is fresh
+
+        # Top 5 with source diversity (max 1 per source name in top 5)
+        top5: list[dict] = []
+        seen_sources: set[str] = set()
+        for r in fresh_results:
+            src = r.get("source", "")
+            if src in seen_sources:
+                continue
+            seen_sources.add(src)
+            top5.append(
+                {
+                    "title": r.get("title", ""),
+                    "snippet": r.get("snippet", "")[:150],
+                    "url": r.get("url", ""),
+                    "source": src,
+                    "time_ago": r.get("time_ago", ""),
+                }
+            )
+            if len(top5) >= 5:
+                break
 
         report = SentimentReport(
             ticker=ticker,
@@ -261,14 +413,11 @@ class NewsSearchAgent:
             score=round(avg_score, 4),
             headline_count=len(unique_results),
             sources=list(sources),
-            headlines_he=headlines_he[:5],
-            headlines_en=headlines_en[:5],
-            summary_he=summary_he,
-            summary_en=summary_en,
-            recent_headlines=top3,
+            headlines=headlines[:5],
+            summary=summary,
+            recent_headlines=top5,
         )
 
-        # Cache result
         await cache.cache_news_sentiment(
             ticker,
             {
@@ -277,10 +426,8 @@ class NewsSearchAgent:
                 "score": report.score,
                 "headline_count": report.headline_count,
                 "sources": report.sources,
-                "headlines_he": report.headlines_he,
-                "headlines_en": report.headlines_en,
-                "summary_he": report.summary_he,
-                "summary_en": report.summary_en,
+                "headlines": report.headlines,
+                "summary": report.summary,
                 "recent_headlines": report.recent_headlines,
                 "emoji": report.emoji,
             },
@@ -315,6 +462,6 @@ class NewsSearchAgent:
                     "detail": "MCP offline, using Google API fallback",
                 }
             return {
-                "status": "error",
-                "detail": "MCP offline and no API credentials configured",
+                "status": "degraded",
+                "detail": "MCP offline — using Google News RSS fallback",
             }

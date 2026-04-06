@@ -107,6 +107,45 @@ def to_tase_time(dt: datetime) -> datetime:
     return dt.astimezone(TZ_TASE)
 
 
+def time_to_nyse_open() -> str:
+    """Return human-readable countdown string to next NYSE open.
+
+    Returns:
+        '🟢 OPEN — closes at 4:00 PM ET' if currently open,
+        'Opens in Xh Ym (9:30 AM ET)' if before open today,
+        '🔴 Closed — reopens tomorrow at 9:30 AM ET' if after close today,
+        '🔴 Closed — reopens Monday 9:30 AM ET' if weekend.
+    """
+    now = now_us()
+    weekday = now.weekday()
+    t = now.time()
+
+    if weekday in NYSE_TRADING_DAYS and NYSE_OPEN <= t <= NYSE_CLOSE:
+        return "🟢 OPEN — closes at 4:00 PM ET"
+
+    if weekday in NYSE_TRADING_DAYS and t < NYSE_OPEN:
+        from datetime import datetime as _dt
+
+        today_open = TZ_US.localize(
+            _dt(now.year, now.month, now.day, NYSE_OPEN.hour, NYSE_OPEN.minute)
+        )
+        delta = today_open - now
+        total_minutes = int(delta.total_seconds() // 60)
+        hours, minutes = divmod(total_minutes, 60)
+        if hours > 0:
+            return f"Opens in {hours}h {minutes}m (9:30 AM ET)"
+        return f"Opens in {minutes}m (9:30 AM ET)"
+
+    if weekday == 5:  # Saturday
+        return "🔴 Closed — reopens Monday 9:30 AM ET"
+    if weekday == 6:  # Sunday
+        return "🔴 Closed — reopens Monday 9:30 AM ET"
+    # Weekday after close
+    if weekday == 4:  # Friday after close
+        return "🔴 Closed — reopens Monday 9:30 AM ET"
+    return "🔴 Closed — reopens tomorrow at 9:30 AM ET"
+
+
 def market_status() -> dict[str, bool | str]:
     """Return current open/closed status for both markets.
 

@@ -12,7 +12,6 @@ from sqlalchemy import select
 from src.database.cache import cache
 from src.database.models import PriceHistory
 from src.database.session import AsyncSessionLocal
-from src.quant.arbitrage import DUAL_LISTED, calculate_arbitrage
 from src.quant.fibonacci import FibonacciLevels, calculate_fibonacci
 from src.quant.indicators import generate_signals
 from src.utils.logger import get_logger
@@ -21,7 +20,7 @@ from src.utils.timezone_utils import market_status, now_utc
 logger = get_logger(__name__)
 
 # Tickers polled every minute during market hours
-_WATCHLIST_BASE = ["AAPL", "MSFT", "SPY", "QQQ"]
+_WATCHLIST_BASE = ["AAPL", "MSFT", "NVDA", "GOOGL", "META", "SPY", "QQQ", "TSLA"]
 
 
 @dataclass
@@ -31,7 +30,6 @@ class QuantSignal:
     price: float
     signals: dict
     fibonacci: dict | None = None
-    arbitrage: dict | None = None
     market_status: dict | None = None
     ohlcv: dict | None = None  # last bar OHLCV for DB persistence
 
@@ -128,38 +126,12 @@ class QuantEngine:
             "nearest_resistance": fib_levels.nearest_resistance,
         }
 
-        # Arbitrage (only for dual-listed stocks)
-        arb_dict = None
-        if ticker.upper() in DUAL_LISTED:
-            tase_ticker = DUAL_LISTED[ticker.upper()]
-            try:
-                tase_df = await self.fetch_price_data(
-                    tase_ticker, period="5d", interval="1d"
-                )
-                tase_price = float(tase_df["Close"].iloc[-1])
-                arb_signal = await calculate_arbitrage(
-                    ticker_us=ticker.upper(),
-                    price_us_usd=signals["price"],
-                    price_tase_ils=tase_price,
-                )
-                arb_dict = {
-                    "ticker_tase": arb_signal.ticker_tase,
-                    "gap_pct": arb_signal.gap_pct,
-                    "gap_direction": arb_signal.gap_direction,
-                    "is_opportunity": arb_signal.is_opportunity,
-                    "price_tase_in_usd": arb_signal.price_tase_in_usd,
-                    "usd_ils_rate": arb_signal.usd_ils_rate,
-                }
-            except Exception as exc:
-                logger.warning("arbitrage_calc_failed", ticker=ticker, error=str(exc))
-
         result = QuantSignal(
             ticker=ticker,
             timestamp=now_utc().isoformat(),
             price=signals["price"],
             signals=signals,
             fibonacci=fib_dict,
-            arbitrage=arb_dict,
             market_status=market_status(),
             ohlcv=ohlcv,
         )
@@ -194,13 +166,7 @@ class QuantEngine:
 
     async def _poll_watchlist(self) -> None:
         """Analyze all watchlist tickers and cache results in Redis."""
-        # Deduplicated watchlist: dual-listed + base US stocks
-        seen: set[str] = set()
-        watchlist: list[str] = []
-        for t in list(DUAL_LISTED.keys()) + _WATCHLIST_BASE:
-            if t not in seen:
-                seen.add(t)
-                watchlist.append(t)
+        watchlist = list(_WATCHLIST_BASE)
 
         for ticker in watchlist:
             try:

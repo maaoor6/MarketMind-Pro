@@ -21,7 +21,7 @@ async def test_db_connection():
     assert result["status"] == "ok"
 
 
-@pytest_asyncio.fixture
+@pytest_asyncio.fixture(loop_scope="function")
 async def db_session():
     """Create a clean test session with rollback."""
     async with async_engine.begin() as conn:
@@ -30,6 +30,8 @@ async def db_session():
     async with AsyncSessionLocal() as session:
         yield session
         await session.rollback()
+
+    await async_engine.dispose()
 
 
 @pytest.mark.integration
