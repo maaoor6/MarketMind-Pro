@@ -1,560 +1,282 @@
 # MarketMind-Pro 📈
 
-> **מערכת מסחר אוטונומית** לבורסת תל אביב (TASE) ושוק האמריקאי — מבוססת סוכנים חכמים, ניתוח כמותי בזמן אמת, פונדמנטלי, וסנטימנט חדשות.
+> Autonomous trading intelligence for US markets and TASE (Tel Aviv Stock Exchange) — real-time quantitative analysis, fundamentals, news sentiment, and interactive charts via Telegram.
 
-[![Python](https://img.shields.io/badge/Python-3.12+-blue?logo=python)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3.13+-blue?logo=python)](https://python.org)
 [![Platform](https://img.shields.io/badge/Platform-Apple%20Silicon%20M4-black?logo=apple)](https://apple.com)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 [![Version](https://img.shields.io/badge/Version-1.1.0-orange)]()
 
 ---
 
-## תוכן עניינים
+## What It Does
 
-- [מה המערכת עושה](#מה-המערכת-עושה)
-- [ארכיטקטורה](#ארכיטקטורה)
-- [שעות מסחר](#שעות-מסחר)
-- [דרישות מוקדמות](#דרישות-מוקדמות)
-- [התקנה והפעלה](#התקנה-והפעלה)
-- [Dashboard לוקלי (Streamlit)](#dashboard-לוקלי-streamlit)
-- [בוט Telegram](#בוט-telegram)
-- [מבנה הפרויקט](#מבנה-הפרויקט)
-- [משתני סביבה](#משתני-סביבה)
-- [טסטים](#טסטים)
-- [CI/CD](#cicd)
-
----
-
-## מה המערכת עושה
-
-MarketMind-Pro היא פלטפורמה אוטונומית לניתוח שוק ההון, המשלבת:
-
-| יכולת | תיאור |
+| Capability | Description |
 |---|---|
-| **ניתוח כמותי** | RSI, MACD, ממוצעים נעים (SMA/EMA 20–200), זיהוי ספייק נפח |
-| **פיבונאצ'י** | חישוב אוטומטי של רמות Retracement ו-Extension לפי 52 שבועות |
-| **ארביטראז'** | זיהוי פערי מחיר בין מניות כפול-רישום (TASE/NYSE) עם המרת ILS/USD בזמן אמת |
-| **פונדמנטלי** | P/E, EPS, דיבידנד, יעד אנליסטים, שווי שוק, עסקאות בעלי עניין, מתחרים |
-| **סנטימנט חדשות** | סריקת Globes, Calcalist, Reuters, Bloomberg — ציון -1.0 עד +1.0 |
-| **בוט Telegram** | ניתוח מלא בעברית, /compare, דוחות אוטומטיים 3× ביום |
-| **Dashboard לוקלי** | ממשק Streamlit עם גרפים אינטראקטיביים ישירות בדפדפן |
-| **גרפים + GitHub Pages** | Candlestick + Volume + RSI + Fibonacci — פרסום אוטומטי לאינטרנט |
+| **Technical Analysis** | RSI, MACD, SMA/EMA (20–200), volume spike detection |
+| **Fibonacci** | Auto-computed retracement + extension levels from 52-week H/L |
+| **Arbitrage** | TASE/NYSE price gap detection for dual-listed Israeli stocks, live USD/ILS rate |
+| **Fundamentals** | P/E, EPS, dividend yield, analyst target, market cap, insider transactions, competitors |
+| **News Sentiment** | Google News RSS + Yahoo Finance → score -1.0 to +1.0 with source diversity |
+| **Telegram Bot** | Full English analysis on demand + automated pre-market and post-close reports |
+| **Interactive Charts** | Candlestick + Volume + RSI + Fibonacci published to GitHub Pages |
+| **Streamlit Dashboard** | Local browser UI for ad-hoc analysis without Telegram |
 
-### מניות ארביטראז' נתמכות
-
-`TEVA`, `NICE`, `CHKP`, `AMDOCS`, `CEVA`, `GILT`, `RADCOM`, `TOWER`, `ORCL`
+**Dual-listed stocks supported:** `TEVA`, `NICE`, `CHKP`, `AMDOCS`, `CEVA`, `GILT`, `RADCOM`, `TOWER`, `ORCL`
 
 ---
 
-## ארכיטקטורה
+## Architecture
 
 ```
-┌──────────────────────────────────────────────────┐
-│                   MarketMind-Pro                 │
-│                                                  │
-│  ┌────────────┐  ┌────────────┐  ┌────────────┐  │
-│  │    News    │  │   Quant    │  │  Telegram  │  │
-│  │   Search   │  │   Engine  │  │ Dispatcher │  │
-│  │   Agent    │  │   Agent    │  │   Agent    │  │
-│  └─────┬──────┘  └─────┬──────┘  └─────┬──────┘  │
-│        │               │               │          │
-│  ┌─────▼───────────────▼───────────────▼──────┐   │
-│  │         PostgreSQL  +  Redis Cache         │   │
-│  └─────────────────────────────────────────────┘  │
-│                                                  │
-│  ┌────────────┐  ┌────────────┐                  │
-│  │ Google MCP │  │  SQL MCP   │                  │
-│  │  :8001     │  │  :8002     │                  │
-│  └────────────┘  └────────────┘                  │
-│                                                  │
-│  ┌────────────────────────────────────────────┐  │
-│  │       Streamlit Dashboard  :8501           │  │
-│  └────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────┘
+Telegram command / scheduled job
+  → telegram_dispatcher.py
+      → quant_engine.py       (price data + indicators)
+      → news_search_agent.py  (sentiment via RSS)
+      → fundamentals.py       (yfinance profile + insider data)
+      → publisher.py          (Plotly chart → GitHub Pages)
+  → HTML message + InlineKeyboard → user
+
+Infrastructure:
+  PostgreSQL  — price history, alerts, insider transactions, sentiment records
+  Redis       — quote cache (60s), news cache (15m), fundamentals cache (4h)
+  MCP :8001   — Google Search (optional)
+  MCP :8002   — SQL query (optional)
+  Streamlit :8501 — local dashboard
 ```
 
-**עקרונות עיצוב:**
-- **Agents First** — כל יכולת היא סוכן עצמאי עם אחריות יחידה
-- **Stateless Agents** — מצב שמור ב-PostgreSQL/Redis, לא בזיכרון
-- **Fail Loud** — אף חריגה לא מושתקת; הכל נרשם בלוגים
-- **Security by Default** — אין סודות בקוד; הכל דרך `.env`
-- **Hebrew First** — כל פלט Telegram בעברית עם `ParseMode.HTML`
+**Design principles:** Stateless agents (state in Postgres/Redis), fail loud (structured logging via structlog), security by default (no secrets in code).
 
 ---
 
-## שעות מסחר
+## Prerequisites
 
-| שוק | ימים | שעות | הערה |
-|---|---|---|---|
-| **ת"א (TASE)** | שני–חמישי | 10:00–17:25 שעון ישראל | פתיחה מוקדמת (pre-open) 09:45 |
-| **ת"א (TASE)** | שישי | 10:00–15:45 שעון ישראל | סגירה מוקדמת |
-| **ת"א (TASE)** | שבת–ראשון | סגור | |
-| **NYSE/NASDAQ** | שני–שישי | 09:30–16:00 ET | |
-
-### דוחות אוטומטיים (Telegram)
-
-| שעה (ישראל) | ימים | תוכן |
-|---|---|---|
-| **09:30** | שני–שישי | תצוגה מקדימה לפני פתיחה + RSI מהיר |
-| **17:45** | שני–חמישי | סיכום סגירה יומי |
-| **16:05** | שישי | סיכום סגירה מוקדמת |
-
----
-
-## דרישות מוקדמות
-
-| דרישה | גרסה מינימלית |
+| Requirement | Minimum |
 |---|---|
-| Python | 3.12+ |
+| Python | 3.13+ |
 | Docker + Docker Compose | Docker 24+ |
-| Apple Silicon | M1/M2/M3/M4 (arm64) |
-| Telegram Bot Token | דרך [@BotFather](https://t.me/BotFather) |
-| Google Custom Search API | אופציונלי — לסנטימנט חדשות |
+| Telegram Bot Token | from [@BotFather](https://t.me/BotFather) |
+| GitHub Token | PAT with `repo` scope — for chart publishing |
 
 ---
 
-## התקנה והפעלה
+## Installation & Startup
 
-### אפשרות 1 — Docker (מומלץ, הכי פשוט)
+### Option 1 — Docker (recommended)
 
 ```bash
-# 1. שכפל את הפרויקט
 git clone https://github.com/maaoor6/MarketMind-Pro.git
 cd MarketMind-Pro
 
-# 2. הגדר משתני סביבה
 cp .env.example .env
-# ערוך את .env והכנס את הטוקנים שלך (ראה סעיף משתני סביבה)
+# Edit .env and fill in TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, GITHUB_TOKEN
 
-# 3. הפעל את כל הסרביסים
 docker compose up -d
-
-# 4. בדוק שהכל עלה תקין
-docker compose ps
 ```
 
-זהו — המערכת פועלת. השירותים זמינים:
+Services available after startup:
 
-| שירות | כתובת | תיאור |
+| Service | URL | Description |
 |---|---|---|
-| Dashboard | http://localhost:8501 | ממשק Streamlit לוקלי |
-| Google MCP | http://localhost:8001 | MCP לחיפוש חדשות |
-| SQL MCP | http://localhost:8002 | MCP לשאילתות DB |
-| PostgreSQL | localhost:5432 | מסד נתונים |
-| Redis | localhost:6379 | Cache |
+| Streamlit Dashboard | http://localhost:8501 | Local chart UI |
+| Google MCP | http://localhost:8001 | News search MCP |
+| SQL MCP | http://localhost:8002 | DB query MCP |
+| PostgreSQL | localhost:5432 | |
+| Redis | localhost:6379 | |
 
----
-
-## הרצה ועצירה יומיומית
-
-לאחר שהפרויקט כבר מותקן, אלו הפקודות שתשתמש בהן בכל יום:
-
-> **חשוב:** כל הפקודות הבאות מריצים מתוך תיקיית הפרויקט.
-
-### הפעל את המערכת
-```bash
-docker compose up -d
-```
-
-### בדוק שהכל עלה תקין
-```bash
-docker compose ps
-```
-כל השורות צריכות להציג `healthy` או `running`.
-
-### כנס לדשבורד
-פתח דפדפן: **http://localhost:8501**
-
-### עצור את המערכת
-```bash
-docker compose down
-```
-
-### לוגים — אם משהו לא עובד
-```bash
-# כל הסרביסים
-docker compose logs -f
-
-# רק האפליקציה
-docker compose logs -f app
-
-# רק הדשבורד
-docker compose logs -f dashboard
-```
-יציאה מהלוגים: `Ctrl + C`
-
-### עדכון קוד — rebuild לאחר שינויים
-```bash
-docker compose up -d --build
-```
-משתמש בזה אחרי כל שינוי בקוד כדי שה-Docker יבנה מחדש את ה-image.
-
-### הפעלה מחדש של סרביס ספציפי
-```bash
-# רק האפליקציה
-docker compose restart app
-
-# רק הדשבורד
-docker compose restart dashboard
-
-# רק הבוט (telegram)
-docker compose restart app
-```
-
-### עצירה זמנית (ללא מחיקת נתונים)
-```bash
-docker compose stop
-```
-שונה מ-`down` — הקונטיינרים נעצרים אך לא נמחקים. הפעלה חוזרת:
-```bash
-docker compose start
-```
-
-### הרצת migration (לאחר שינוי ב-DB)
-```bash
-docker compose run --rm migrate
-```
-
-### כניסה ישירה למסד הנתונים
-```bash
-docker compose exec postgres psql -U marketmind -d marketmind
-```
-יציאה: `\q`
-
-### הרצת טסטים
-```bash
-# טסטים יחידתיים
-docker compose run --rm app pytest tests/unit/ -v
-
-# עם coverage
-docker compose run --rm app pytest tests/unit/ --cov=src/quant --cov-report=term-missing
-```
-
-### מחיקת כל הנתונים (איפוס מלא)
-```bash
-docker compose down -v
-```
-> ⚠️ פקודה זו מוחקת את כל נתוני ה-DB וה-Redis. אין דרך חזרה.
-
----
-
-### סיכום מהיר
-
-| פעולה | פקודה |
-|---|---|
-| **הפעל** | `docker compose up -d` |
-| **עצור** | `docker compose down` |
-| **עצור זמנית** | `docker compose stop` |
-| **הפעל חוזר** | `docker compose start` |
-| **עדכן קוד** | `docker compose up -d --build` |
-| **Restart סרביס** | `docker compose restart app` |
-| **סטטוס** | `docker compose ps` |
-| **לוגים** | `docker compose logs -f` |
-| **Migrations** | `docker compose run --rm migrate` |
-| **טסטים** | `docker compose run --rm app pytest tests/unit/` |
-| **איפוס מלא** | `docker compose down -v` |
-| **דשבורד** | http://localhost:8501 |
-
----
-
----
-
-### אפשרות 2 — התקנה לוקלית (לפיתוח)
+### Option 2 — Local dev
 
 ```bash
-# 1. צור סביבה וירטואלית
-python3.12 -m venv .venv
-source .venv/bin/activate
-
-# 2. התקן תלויות
+python3.13 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-# 3. הפעל PostgreSQL ו-Redis דרך Docker בלבד
 docker compose up -d postgres redis
-
-# 4. הגדר סביבה
-cp .env.example .env
-# ערוך .env
-
-# 5. הרץ migrations
+cp .env.example .env  # edit with your values
 alembic upgrade head
-
-# 6. הפעל את הבוט
 python -m src.agents.telegram_dispatcher
-
-# או — הפעל רק את ה-Dashboard
-streamlit run src/ui/dashboard.py
 ```
 
 ---
 
-## Dashboard לוקלי (Streamlit)
+## Daily Operations
 
-הדשבורד מאפשר ניתוח מניות ישירות מהדפדפן ללא צורך ב-Telegram.
-
-**הפעלה:**
-```bash
-# לוקלי
-streamlit run src/ui/dashboard.py
-
-# דרך Docker
-docker compose up -d dashboard
-```
-
-פתח: **http://localhost:8501**
-
-**מה רואים:**
-
-- בחר ticker בסרגל הצד (ברירת מחדל: `TEVA`)
-- בחר תקופה: 3mo / 6mo / 1y / 2y / 5y
-- בחר ממוצעים נעים להצגה
-- הפעל/כבה Fibonacci ו-Arbitrage
-
-**תכולת הדשבורד:**
-
-```
-📊 מדדים מרכזיים   → מחיר, שינוי יומי, 52W High/Low, ממוצע נפח
-📉 אינדיקטורים     → RSI + אות, MACD Histogram, ספייק נפח
-📈 גרף אינטראקטיבי → Candlestick + Volume + RSI subplot + Fibonacci lines
-📐 טבלת פיבונאצ'י  → כל רמות Retracement + Extension + תמיכה/התנגדות
-⚖️ ארביטראז'       → פער TASE/NYSE + שער USD/ILS בזמן אמת
-```
-
----
-
-## בוט Telegram
-
-### הגדרת הבוט
-
-1. פתח שיחה עם [@BotFather](https://t.me/BotFather) ב-Telegram
-2. שלח `/newbot` ועקוב אחר ההוראות
-3. קבל `TELEGRAM_TOKEN` והכנס ל-`.env`
-4. קבל את ה-`TELEGRAM_CHAT_ID` של הצ'אט/ערוץ שלך
-
-### פקודות הבוט (עברית מלאה)
-
-| פקודה | תיאור |
+| Action | Command |
 |---|---|
-| `/start` | תפריט ראשי עם כפתורים |
-| `/analyze TEVA` | ניתוח מלא — מחיר, RSI, MACD, ממוצעים נעים, פיבונאצ'י, **פונדמנטלי**, **בעלי עניין**, ארביטראז', סנטימנט, לינק גרף |
-| `/fibonacci AAPL` | רמות פיבונאצ'י מלאות לפי 52 שבועות |
-| `/arbitrage TEVA` | פער ארביטראז' TASE/NYSE + שער ILS/USD |
-| `/compare TEVA CHKP` | **חדש** — השוואה עברית צד-לצד: מחיר, RSI, MACD, P/E, EPS, שווי שוק |
-| `/health` | סטטוס כל הסרביסים (Quant, News, DB, Redis) |
-
-### דוגמת פלט `/analyze TEVA`
-
-```
-📊 ניתוח TEVA
-━━━━━━━━━━━━━━━━━━━
-💰 מחיר נוכחי: $16.42
-🕐 עדכון: 05/04/2026 14:30 UTC
-
-🏢 Teva Pharmaceutical Industries (TEVA)
-🏭 תחום: Healthcare | Drug Manufacturers
-💰 שווי שוק: $18.4B
-
-📊 מכפילים ומדדים:
-  מכפיל רווח (P/E) נוכחי: 8.2
-  מכפיל רווח (P/E) צפוי:  6.9
-  EPS נוכחי:  $2.01
-  EPS צפוי:   $2.38
-  תשואת דיבידנד: לא זמין
-  🎯 יעד אנליסטים: $20.50
-  📈 טווח 52 שבועות: $12.50 – $21.30
-  🆚 מתחרים עיקריים: MRK, PFE, AMGN
-
-📉 אינדיקטורים טכניים:
-  RSI(14): 43.2  ⚪ נייטרלי
-  MACD קו: -0.0812  |  סיגנל: -0.0654
-  MACD היסטוגרמה: -0.0158  📉 דובי
-  ספייק נפח: ❌ לא
-
-📏 ממוצעים נעים:
-  SMA_20: $16.71  ↓ מתחת
-  SMA_50: $17.14  ↓ מתחת
-  SMA_200: $15.88  ↑ מעל
-
-📐 פיבונאצ'י (52 שבועות):
-  שיא: $21.30  |  שפל: $12.50
-  מגמת ירידה 📉  |  מיקום: 44.5% מהשפל
-  🟢 תמיכה קרובה: $15.97
-  🔴 התנגדות קרובה: $16.85
-
-⚖️ ארביטראז' TASE/NYSE:
-  TASE (TEVA.TA): $16.38  |  שער: ₪3.7210
-  פער: 0.24%  —  ארה"ב במחיר פרמיום
-
-🕵️ עסקאות בעלי עניין:
-  🔴 מכירה — Richard Francis (CEO)
-  05/03/2026: 50,000 מניות @ $17.20  |  סה"כ: $860,000
-
-📰 סנטימנט חדשות:
-  🟡 ציון: -0.12  ▓▓▓▓░░░░░░
-
-🌍 מצב שוק:
-  🇺🇸 NYSE: 🟢 פתוח  |  🇮🇱 ת"א: 🔴 סגור
-
-📊 צפה בגרף אינטראקטיבי
-```
-
-### דוגמת פלט `/compare TEVA CHKP`
-
-```
-⚖️ השוואה: TEVA מול CHKP
-━━━━━━━━━━━━━━━━━━━
-מדד             TEVA         CHKP
-─────────────────────────────
-💰 מחיר         $16.42       $165.30
-📉 RSI(14)      43.2         58.7
-📊 MACD         📉 דובי      📈 שורי
-📐 פיבונאצ'י   📉 ירידה     📈 עלייה
-📈 P/E          8.2          22.4
-💵 EPS          2.01         7.84
-🏦 שווי שוק    18.4B        16.1B
-```
+| Start | `docker compose up -d` |
+| Stop | `docker compose down` |
+| Rebuild after code change | `docker compose up -d --build` |
+| Status | `docker compose ps` |
+| Logs | `docker compose logs -f app` |
+| Run migrations | `docker compose run --rm migrate` |
+| DB shell | `docker compose exec postgres psql -U marketmind -d marketmind` |
+| Full reset (deletes all data) | `docker compose down -v` |
 
 ---
 
-## מבנה הפרויקט
+## Telegram Bot
 
-```
-MarketMind-Pro/
-├── src/
-│   ├── agents/
-│   │   ├── news_search_agent.py    # סוכן סנטימנט חדשות (Google Search MCP)
-│   │   ├── quant_engine.py         # סוכן ניתוח טכני + אינדיקטורים
-│   │   └── telegram_dispatcher.py  # בוט Telegram + inline keyboards
-│   ├── quant/
-│   │   ├── indicators.py           # RSI, MACD, SMA, EMA, Volume Spike
-│   │   ├── fibonacci.py            # רמות פיבונאצ'י (52 שבועות)
-│   │   ├── arbitrage.py            # זיהוי פערי ארביטראז' TASE/NYSE
-│   │   └── fundamentals.py         # P/E, EPS, עסקאות פנים, מתחרים [v1.1.0]
-│   ├── database/
-│   │   ├── models.py               # מודלי SQLAlchemy (5 טבלאות)
-│   │   ├── session.py              # ניהול חיבורי DB (async)
-│   │   └── cache.py                # Redis cache layer
-│   ├── mcp/
-│   │   ├── google_search_mcp.py    # MCP Server — חיפוש Google
-│   │   └── sql_mcp_server.py       # MCP Server — שאילתות SQL
-│   ├── ui/
-│   │   ├── charts.py               # גרפי Plotly (candlestick, Fibonacci)
-│   │   ├── dashboard.py            # Streamlit Dashboard לוקלי
-│   │   └── publisher.py            # פרסום גרפים ל-GitHub Pages [v1.1.0]
-│   └── utils/
-│       ├── config.py               # הגדרות (pydantic-settings)
-│       ├── logger.py               # structlog logger
-│       └── timezone_utils.py       # שעוני שוק, currency_symbol [v1.1.0]
-├── tests/
-│   ├── unit/                       # טסטים ללא I/O
-│   │   ├── test_indicators.py
-│   │   ├── test_fibonacci.py
-│   │   ├── test_arbitrage.py
-│   │   └── test_timezone_utils.py
-│   └── integration/                # טסטים עם Docker
-│       └── test_database.py
-├── alembic/
-│   └── versions/
-│       └── 0001_initial_schema.py
-├── scripts/
-│   ├── init_db.sql
-│   └── install_hooks.sh
-├── .github/
-│   └── workflows/
-│       └── ci.yml
-├── docker-compose.yml
-├── Dockerfile
-├── pyproject.toml
-├── requirements.txt
-├── .env.example
-└── CLAUDE.md
-```
+### Commands
 
----
+| Command | Description |
+|---|---|
+| `/start` | Welcome menu with NYSE status + countdown, inline action buttons |
+| `/analyze AAPL` | Full report: price + daily %, RSI, MACD, MAs, Fibonacci, fundamentals, insider trades, news sentiment, interactive chart button |
+| `/news AAPL` | Top 5 live headlines with snippets and source labels; shows global market snapshot if no ticker given |
+| `/fibonacci AAPL` | 52-week Fibonacci retracement + extension levels with nearest support/resistance |
+| `/compare AAPL MSFT` | Side-by-side comparison: price, RSI, MACD, Fibonacci trend, P/E, EPS, market cap |
+| `/health` | System dashboard: DB, Redis, MCP servers, news RSS connectivity |
 
-## משתני סביבה
+Unrecognized text messages trigger a fallback inline menu.
 
-העתק `.env.example` ל-`.env` ומלא את הערכים:
+### Automated Reports (APScheduler)
 
-```bash
-cp .env.example .env
-```
-
-| משתנה | חובה | תיאור |
+| Time (ET) | Days | Content |
 |---|---|---|
-| `DATABASE_URL` | ✅ | PostgreSQL (asyncpg) |
-| `DATABASE_URL_SYNC` | ✅ | PostgreSQL (psycopg2 — לAlembic) |
-| `REDIS_URL` | ✅ | Redis connection string |
-| `TELEGRAM_TOKEN` | ✅ | טוקן בוט מ-@BotFather |
-| `TELEGRAM_CHAT_ID` | ✅ | ID של הצ'אט/ערוץ |
-| `EXCHANGERATE_API_KEY` | ⚠️ | שער USD/ILS בזמן אמת (ברירת מחדל: 3.72) |
-| `GOOGLE_API_KEY` | ⚠️ | לסנטימנט חדשות |
-| `GOOGLE_SEARCH_ENGINE_ID` | ⚠️ | Google Custom Search Engine |
-| `ALPHA_VANTAGE_KEY` | ❌ | מקור נתונים חלופי |
-| `GITHUB_TOKEN` | ⚠️ | לפרסום גרפים ב-GitHub Pages (נדרש ל-/analyze) |
-| `GITHUB_PAGES_REPO` | ⚠️ | שם ריפו ל-GitHub Pages (ברירת מחדל: maaoor6/MarketMind-Pro) |
+| **9:00 AM ET** | Mon–Fri | Pre-market preview: AAPL, MSFT, NVDA, SPY, QQQ with price + RSI + global snapshot |
+| **4:15 PM ET** | Mon–Fri | Post-close summary: AAPL, MSFT, NVDA, GOOGL, SPY with full signals |
 
-**⚠️ = מומלץ | ❌ = אופציונלי**
+### Sample `/analyze AAPL` output
+
+```
+📊 ANALYSIS — AAPL
+━━━━━━━━━━━━━━━━━━━
+💰 Current Price: $213.49  📈 +1.42%
+🕐 Updated: 07/04/2026 14:30 ET
+
+🏢 Apple Inc. (AAPL) — NASDAQ
+🏭 Technology | Consumer Electronics | 👥 150,000 employees
+💰 Market Cap: $3.2T
+
+📊 Valuation Metrics:
+  P/E (Trailing): 33.2x    P/E (Forward): 29.1x
+  EPS (Trailing): $6.43    EPS (Forward):  $7.32
+  Dividend Yield: 0.44%
+  🎯 Analyst Target: $240.00
+
+📈 52-Week Range: $164.08 – $237.49
+🆚 Competitors: MSFT, GOOGL, META
+
+📉 Technical Indicators:
+  RSI(14): 48.3  ⚪ Neutral
+  MACD Line: +0.2841  |  Signal: +0.1923
+  MACD Histogram: +0.0918  📈 Bullish
+  Volume Spike: ❌ No
+
+📏 Moving Averages:
+  SMA_20: $210.14  ↑ Above
+  SMA_50: $225.67  ↓ Below
+  SMA_200: $203.45  ↑ Above
+
+📐 Fibonacci (52-week):
+  High: $237.49  |  Low: $164.08
+  Uptrend 📈  |  Position: 67.3% from low
+  🟢 Nearest Support:  $207.10
+  🔴 Nearest Resistance: $216.38
+
+🕵️ Insider Transactions — AAPL
+  🔴 SELL — Timothy Cook (CEO)
+  15/03/2026: 200,000 shares @ $219.50  |  Total: $43,900,000
+
+📰 News Sentiment: 🟢 +0.38 (14 articles)
+
+🌍 Market Status:
+  🇺🇸 NYSE: 🟢 Open
+
+[📊 Interactive Chart]  [📰 News]
+```
+
+### Market Snapshot (`/news` without ticker)
+
+Shows ETF-based global snapshot grouped by category:
+- **Equities**: SPY, VOO, QQQ, DIA, IWM, RSP
+- **Currency/Vol**: DX-Y.NYB (DXY), ^VIX
+- **Fixed Income**: TLT, AGG
+- **Commodities**: GLD, SLV, USO
+- **Crypto**: BTC-USD, ETH-USD
 
 ---
 
-## טסטים
+## Streamlit Dashboard
+
+Run locally at http://localhost:8501:
 
 ```bash
-# טסטים יחידתיים (ללא Docker — מהיר)
+streamlit run src/ui/dashboard.py
+```
+
+Sidebar controls: ticker input, period (3mo–5y), MA selection, Fibonacci toggle.
+Main panels: key metrics row, RSI/MACD/volume-spike signals, 3-panel dark-mode chart (candlestick+MAs, volume, RSI), Fibonacci retracement + extension tables with nearest support/resistance.
+
+---
+
+## Environment Variables
+
+Copy `.env.example` to `.env` and fill in your values.
+
+| Variable | Required | Description |
+|---|---|---|
+| `DATABASE_URL` | ✅ | PostgreSQL async (`postgresql+asyncpg://...`) |
+| `DATABASE_URL_SYNC` | ✅ | PostgreSQL sync for Alembic (`postgresql+psycopg2://...`) |
+| `REDIS_URL` | ✅ | Redis connection string |
+| `TELEGRAM_TOKEN` | ✅ | Bot token from @BotFather |
+| `TELEGRAM_CHAT_ID` | ✅ | Target chat or channel ID |
+| `GITHUB_TOKEN` | ✅ | PAT with `repo` scope — for chart publishing |
+| `GITHUB_PAGES_REPO` | ✅ | `owner/repo` format (default: `maaoor6/MarketMind-Pro`) |
+| `EXCHANGERATE_API_KEY` | ⚠️ | Live USD/ILS rate (falls back to 3.72 if absent) |
+| `GOOGLE_API_KEY` | ⚠️ | Google Custom Search API — news tier 2 |
+| `GOOGLE_SEARCH_ENGINE_ID` | ⚠️ | Required with `GOOGLE_API_KEY` |
+| `ALPHA_VANTAGE_KEY` | ❌ | Backup data source |
+| `QUOTE_CACHE_TTL` | ❌ | Seconds, default 60 |
+| `NEWS_CACHE_TTL` | ❌ | Seconds, default 900 |
+
+**⚠️ = recommended | ❌ = optional**
+
+---
+
+## Testing
+
+```bash
+# Unit tests (no Docker needed)
 pytest tests/unit/ -v
 
-# עם דוח coverage
+# With coverage report
 pytest tests/unit/ --cov=src/quant --cov-report=term-missing
 
-# טסטים אינטגרציה (דורשים Docker פעיל)
+# Integration tests (requires Docker services)
 docker compose up -d postgres redis
 pytest tests/integration/ -m integration -v
-
-# הרצת כל הטסטים
-pytest
 ```
 
-**כיסוי נדרש:** מינימום 80% על `src/quant/`.
-
-**מצב טסטים נוכחי:** 44 טסטים יחידתיים, כולם עוברים ✅
+Current status: **47 unit tests passing** ✅ | Minimum 80% coverage on `src/quant/`
 
 ---
 
 ## CI/CD
 
-הפרויקט כולל GitHub Actions workflow (`.github/workflows/ci.yml`) שמריץ בכל push:
+GitHub Actions (`.github/workflows/ci.yml`) runs on every push to `main`:
 
-1. `ruff check` — בדיקת linting
-2. `black --check` — בדיקת פורמט
-3. `bandit -r src/` — סריקת אבטחה
-4. `pytest tests/unit/` — טסטים יחידתיים
+1. `ruff check` — lint
+2. `black --check` — format
+3. `bandit -r src/ -ll` — security scan (blocks on MEDIUM+)
+4. `pytest tests/unit/` — unit tests with coverage
+5. Integration tests (with Postgres + Redis service containers)
+6. Docker arm64 build validation
 
-### Git Hooks (pre-commit)
-
-```bash
-# התקן hooks מקומית
-bash scripts/install_hooks.sh
-```
-
-הhooks מריצים לפני כל commit: ruff → black → bandit → pytest unit.
+Install local pre-commit hooks: `bash scripts/install_hooks.sh`
 
 ---
 
-## אבטחה
+## Market Hours
 
-- **אין סודות בקוד** — כל credentials דרך `.env` בלבד
-- **`.env` לא עולה ל-git** — מוגן ב-`.gitignore`
-- **Bandit** — סריקת MEDIUM+ severity לפני כל commit
-- **SQL** — SQLAlchemy ORM בלבד, אין f-string SQL
-- **אין `eval()` / `exec()`** בקוד הפרויקט
+| Market | Days | Hours | Notes |
+|---|---|---|---|
+| **NYSE/NASDAQ** | Mon–Fri | 9:30 AM – 4:00 PM ET | |
+| **TASE** | Mon–Thu | 10:00 AM – 5:25 PM IL | Pre-open 9:45 AM |
+| **TASE** | Friday | 10:00 AM – 3:45 PM IL | Early close |
 
 ---
 
-## רישיון
+## License
 
 MIT © 2026 MarketMind-Pro
 
----
-
-> **שים לב:** המערכת מיועדת לצרכי מחקר וניתוח בלבד. אינה מהווה ייעוץ השקעות.
+> **Disclaimer:** For research and analysis purposes only. Not investment advice.
