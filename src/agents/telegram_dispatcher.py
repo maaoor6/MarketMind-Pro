@@ -617,9 +617,8 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not msg_obj:
         return
 
-    quant_health, news_health, db_health, redis_health = await asyncio.gather(
+    quant_health, db_health, redis_health = await asyncio.gather(
         _quant_engine.health_check(),
-        _news_agent.health_check(),
         check_db_connection(),
         redis_cache.health_check(),
     )
@@ -658,7 +657,6 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "🏥 <b>SYSTEM STATUS — MarketMind-Pro</b>",
         "━━━━━━━━━━━━━━━━━━━",
         f"{_s(quant_health)} Quant Engine: {html.escape(quant_health.get('detail', ''))}",
-        f"{_s(news_health)} News Agent:   {html.escape(news_health.get('detail', ''))}",
         f"{news_rss_status} News RSS:     Google News reachable",
         f"{_s(db_health)} PostgreSQL:   {html.escape(db_health.get('detail', ''))}",
         f"{_s(redis_health)} Redis:        {html.escape(redis_health.get('detail', ''))}",
