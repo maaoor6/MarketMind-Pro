@@ -755,34 +755,89 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def _job_market_preview(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Scheduled job: pre-market preview 30 min before NYSE open (9:00 AM ET, Mon–Fri)."""
     watchlist_preview = ["AAPL", "MSFT", "NVDA", "SPY", "QQQ"]
+
+    # Fetch quant signals for all tickers
+    ticker_data: dict[str, dict] = {}
     preview_lines: list[str] = []
     for t in watchlist_preview:
         try:
             sig = await _quant_engine.analyze(t)
             rsi_v = sig.signals.get("rsi")
             rsi_emoji, _ = _rsi_label(sig.signals.get("rsi_signal", "NEUTRAL"))
-            # Compute daily % change from ohlcv if available
             ohlcv = sig.ohlcv or {}
             close = ohlcv.get("close", sig.price)
             open_ = ohlcv.get("open", close)
             pct = (close - open_) / open_ * 100 if open_ else 0.0
             pct_sign = "+" if pct >= 0 else ""
             pct_arrow = "📈" if pct > 0.005 else ("📉" if pct < -0.005 else "➡️")
+            ticker_data[t] = {"price": sig.price, "pct": pct, "rsi": rsi_v}
             preview_lines.append(
                 f"  • <b>{t}</b>: <code>${sig.price:,.2f}</code>  "
                 f"{pct_arrow} {pct_sign}{pct:.2f}%"
                 + (f"  RSI: {rsi_v:.1f} {rsi_emoji}" if rsi_v else "")
             )
         except Exception:
+            ticker_data[t] = {}
             preview_lines.append(f"  • <b>{t}</b>: ❌")
+
+    # Fetch top news headline per ticker in parallel
+    async def _one_headline(t: str) -> str:
+        try:
+            report = await _news_agent.analyze_sentiment(t)
+            if report.recent_headlines:
+                h = report.recent_headlines[0]
+                title = html.escape(h.get("title", "")[:75])
+                src = html.escape(h.get("source", ""))
+                time_ago = h.get("time_ago", "")
+                suffix = f" · {time_ago}" if time_ago else ""
+                return f"    📰 {title}… <i>({src}{suffix})</i>"
+        except Exception:  # noqa: BLE001
+            logger.debug("preview_headline_failed", ticker=t)
+        return ""
+
+    headlines = await asyncio.gather(*[_one_headline(t) for t in watchlist_preview])
+
+    # Interleave ticker lines with headlines
+    ticker_with_news: list[str] = []
+    for line, headline in zip(preview_lines, headlines, strict=False):
+        ticker_with_news.append(line)
+        if headline:
+            ticker_with_news.append(headline)
+
+    # Fetch VIX for market mood
+    vix_price: float | None = None
+    try:
+        vix_data = await _quant_engine.fetch_price_data(
+            "^VIX", period="1d", interval="1m"
+        )
+        if not vix_data.empty:
+            vix_price = float(vix_data["close"].iloc[-1])
+    except Exception:  # noqa: BLE001
+        logger.debug("vix_fetch_failed")
+
+    spy_pct = ticker_data.get("SPY", {}).get("pct")
+    mood_parts = []
+    if spy_pct is not None:
+        spy_sign = "+" if spy_pct >= 0 else ""
+        mood_parts.append(f"SPY {spy_sign}{spy_pct:.2f}%")
+    if vix_price is not None:
+        mood_parts.append(f"VIX {vix_price:.1f} ({_vix_label(vix_price)})")
+    mood_line = "  " + "   ·   ".join(mood_parts) if mood_parts else ""
 
     snapshot = await _fetch_market_snapshot()
     nyse_open_str = now_us().strftime("%I:%M %p ET")
-    msg = (
-        "🌅 <b>Pre-Market Preview — NYSE opens in ~30 minutes</b>\n"
-        f"🕙 {nyse_open_str}\n\n"
-        "📋 <b>Watchlist Status:</b>\n" + "\n".join(preview_lines) + "\n" + snapshot
-    )
+    sections = [
+        "🌅 <b>Pre-Market Preview — NYSE opens in ~30 minutes</b>",
+        f"🕙 {nyse_open_str}",
+        "",
+        "📋 <b>Watchlist:</b>",
+        *ticker_with_news,
+    ]
+    if mood_line:
+        sections += ["", "📊 <b>Market Mood:</b>", mood_line]
+    sections.append(snapshot)
+    msg = "\n".join(sections)
+
     await context.bot.send_message(
         chat_id=settings.telegram_chat_id,
         text=msg,
@@ -855,6 +910,11 @@ async def send_market_close_report(app: Application) -> None:
         "📋 <b>End-of-Day Recap:</b>",
     ]
 
+    pct_map: dict[str, float] = {}
+    rsi_map: dict[str, float | None] = {}
+    macd_map: dict[str, float] = {}
+    signals_list = []
+
     for ticker in watchlist:
         try:
             signal = await _quant_engine.analyze(ticker)
@@ -864,12 +924,84 @@ async def send_market_close_report(app: Application) -> None:
             pct = (close - open_) / open_ * 100 if open_ else 0.0
             pct_sign = "+" if pct >= 0 else ""
             pct_arrow = "📈" if pct > 0.005 else ("📉" if pct < -0.005 else "➡️")
-            lines.append(
+            rsi_v = signal.signals.get("rsi")
+            rsi_emoji, _ = _rsi_label(signal.signals.get("rsi_signal", "NEUTRAL"))
+            macd_hist = signal.signals.get("macd_histogram", 0) or 0
+            pct_map[ticker] = pct
+            rsi_map[ticker] = rsi_v
+            macd_map[ticker] = macd_hist
+            signals_list.append(signal)
+            line = (
                 f"  • <b>{ticker}</b>: <code>${signal.price:,.2f}</code>  "
                 f"{pct_arrow} {pct_sign}{pct:.2f}%"
             )
+            if rsi_v:
+                line += f"  RSI: {rsi_v:.1f} {rsi_emoji}"
+            lines.append(line)
         except Exception:
+            pct_map[ticker] = 0.0
+            rsi_map[ticker] = None
+            macd_map[ticker] = 0.0
+            signals_list.append(None)
             lines.append(f"  • <b>{ticker}</b>: ❌")
+
+    # Winner / Loser
+    valid_pct = {t: p for t, p in pct_map.items() if p != 0.0}
+    if valid_pct:
+        winner = max(valid_pct, key=valid_pct.get)  # type: ignore[arg-type]
+        loser = min(valid_pct, key=valid_pct.get)  # type: ignore[arg-type]
+        w_sign = "+" if valid_pct[winner] >= 0 else ""
+        l_sign = "+" if valid_pct[loser] >= 0 else ""
+        lines += [
+            "",
+            f"🏆 <b>Best:</b> {winner} {w_sign}{valid_pct[winner]:.2f}%   "
+            f"💔 <b>Worst:</b> {loser} {l_sign}{valid_pct[loser]:.2f}%",
+        ]
+
+    # RSI summary
+    overbought = [t for t, r in rsi_map.items() if r and r > 70]
+    oversold = [t for t, r in rsi_map.items() if r and r < 30]
+    neutral_count = len(watchlist) - len(overbought) - len(oversold)
+    lines += [
+        "",
+        f"📊 <b>RSI Summary:</b> {len(overbought)} overbought · {len(oversold)} oversold · {neutral_count} neutral",
+    ]
+
+    # News sentiment per ticker (parallel)
+    try:
+        sentiment_reports = await asyncio.gather(
+            *[_news_agent.analyze_sentiment(t) for t in watchlist],
+            return_exceptions=True,
+        )
+        sent_parts = []
+        for ticker, rep in zip(watchlist, sentiment_reports, strict=False):
+            if isinstance(rep, Exception) or rep is None:
+                continue
+            sent_parts.append(f"  • <b>{ticker}</b> {rep.emoji} {rep.score:+.2f}")
+        if sent_parts:
+            lines += ["", "📰 <b>News Sentiment:</b>", *sent_parts]
+    except Exception:  # noqa: BLE001
+        logger.debug("close_sentiment_failed")
+
+    # Watch Tomorrow signals
+    watch_lines: list[str] = []
+    for ticker, sig in zip(watchlist, signals_list, strict=False):
+        if sig is None:
+            continue
+        rsi = rsi_map.get(ticker)
+        macd = macd_map.get(ticker, 0)
+        if rsi and rsi < 35:
+            watch_lines.append(
+                f"  👀 <b>{ticker}</b> — RSI {rsi:.1f}, potential bounce zone"
+            )
+        elif rsi and rsi > 70:
+            watch_lines.append(
+                f"  ⚠️ <b>{ticker}</b> — RSI {rsi:.1f}, overbought — watch for pullback"
+            )
+        if abs(macd) < 0.05 and macd != 0:
+            watch_lines.append(f"  📶 <b>{ticker}</b> — MACD near zero cross")
+    if watch_lines:
+        lines += ["", "👀 <b>Watch Tomorrow:</b>", *watch_lines]
 
     snapshot = await _fetch_market_snapshot()
     lines.append(snapshot)
@@ -1067,6 +1199,17 @@ def _rsi_label(signal: str) -> tuple[str, str]:
         "OVERBOUGHT": ("🔴", "Overbought — Sell Signal"),
         "NEUTRAL": ("⚪", "Neutral"),
     }.get(signal, ("⚪", signal))
+
+
+def _vix_label(vix: float) -> str:
+    """Return a human-readable fear label for a given VIX level."""
+    if vix < 15:
+        return "😌 Low Fear"
+    if vix < 25:
+        return "😐 Moderate"
+    if vix < 35:
+        return "😬 Elevated"
+    return "😱 Extreme Fear"
 
 
 def _sentiment_bar(score: float) -> str:
