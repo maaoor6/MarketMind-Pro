@@ -2,7 +2,8 @@
 
 import asyncio
 import html
-from datetime import datetime
+import re
+from datetime import UTC, datetime
 from datetime import time as dt_time
 
 import pytz
@@ -19,6 +20,8 @@ from telegram.ext import (
 
 from src.agents.news_search_agent import NewsSearchAgent
 from src.agents.quant_engine import QuantEngine
+from src.database.models import UserAlert
+from src.database.session import AsyncSessionLocal
 from src.quant.fibonacci import calculate_fibonacci
 from src.quant.fundamentals import (
     CompanyProfile,
@@ -33,6 +36,7 @@ from src.quant.fundamentals import (
     save_insider_transactions,
     was_reported_today,
 )
+from src.quant.indicators import MomentumScore, momentum_score
 from src.ui.publisher import PAGES_BASE_URL, publish_ticker_chart
 from src.utils.config import settings
 from src.utils.logger import get_logger
@@ -105,6 +109,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  • /news <code>[TICKER]</code> — Top 5 live news headlines with summaries\n"
         "  • /compare <code>[T1] [T2]</code> — Side-by-side stock comparison\n"
         "  • /fibonacci <code>[TICKER]</code> — 52-week Fibonacci levels\n"
+        "  • /setalert <code>[TICKER] [PRICE]</code> — Set a price alert\n"
+        "  • /myalerts — View your active alerts\n"
+        "  • /cancelalert <code>[TICKER]</code> — Cancel an alert\n"
         "  • /health — System status\n\n"
         "Choose an action:"
     )
@@ -263,14 +270,72 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         # ── Technical indicators ──
         rsi_emoji, rsi_label = _rsi_label(rsi_signal)
+
+        # Momentum Score (uses already-fetched signals + daily price series)
+        ms: MomentumScore | None = None
+        if df_for_chart is not None:
+            try:
+                ms = momentum_score(signals, df_for_chart["Close"].squeeze())
+            except Exception:  # noqa: BLE001
+                logger.debug("momentum_score_failed", ticker=ticker)
+
         lines += [
             "📉 <b>Technical Indicators:</b>",
             f"  RSI(14): <code>{rsi_val:.1f}</code>  {rsi_emoji} {rsi_label}",
             f"  MACD Line: <code>{macd_line:+.4f}</code>  |  Signal: <code>{macd_sig:+.4f}</code>",
             f"  MACD Histogram: <code>{macd_hist:+.4f}</code>  {'📈 Bullish' if macd_hist > 0 else '📉 Bearish'}",
             f"  Volume Spike: {'⚡ YES — Unusual Volume!' if vol_spike else '❌ No'}",
-            "",
         ]
+        if ms is not None:
+            lines.append(
+                f"  ⚡ Momentum Score: <code>{ms.score}/100</code>  {ms.emoji} {ms.label}"
+            )
+        lines.append("")
+
+        # ── Multi-Timeframe Analysis ──
+        try:
+            tf_weekly, tf_monthly = await asyncio.gather(
+                _quant_engine.analyze_timeframe(ticker, "1wk"),
+                _quant_engine.analyze_timeframe(ticker, "1mo"),
+                return_exceptions=True,
+            )
+            tf_rows = [
+                (
+                    "Daily  (1d)",
+                    signals.get("rsi"),
+                    signals.get("rsi_signal", "NEUTRAL"),
+                    macd_hist > 0,
+                ),
+            ]
+            for tf_label, tf_data in [
+                ("Weekly (1wk)", tf_weekly),
+                ("Monthly(1mo)", tf_monthly),
+            ]:
+                if isinstance(tf_data, Exception) or tf_data is None:
+                    continue
+                tf_rows.append(
+                    (
+                        tf_label,
+                        tf_data.get("rsi"),
+                        tf_data.get("rsi_signal", "NEUTRAL"),
+                        tf_data.get("macd_bullish"),
+                    )
+                )
+            tf_lines = ["📊 <b>Multi-Timeframe:</b>"]
+            for tf_lbl, tf_rsi, tf_rsi_sig, tf_macd_bull in tf_rows:
+                rsi_e, _ = _rsi_label(tf_rsi_sig or "NEUTRAL")
+                rsi_str = (
+                    f"RSI <code>{tf_rsi:.1f}</code> {rsi_e}" if tf_rsi else "RSI N/A"
+                )
+                macd_str = (
+                    "MACD 📈"
+                    if tf_macd_bull
+                    else ("MACD 📉" if tf_macd_bull is not None else "MACD —")
+                )
+                tf_lines.append(f"  {tf_lbl}:  {rsi_str}  |  {macd_str}")
+            lines += tf_lines + [""]
+        except Exception:  # noqa: BLE001
+            logger.debug("multitf_failed", ticker=ticker)
 
         # ── Moving averages ──
         if mas:
@@ -594,10 +659,22 @@ async def cmd_compare(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 return "N/A"
             return f"${cap / 1e9:.1f}B" if cap >= 1e9 else f"${cap / 1e6:.0f}M"
 
+        def _momentum(sig: object) -> str:
+            if isinstance(sig, Exception):
+                return "—"
+            try:
+                import pandas as _pd
+
+                ms = momentum_score(sig.signals, _pd.Series(dtype=float))  # type: ignore[union-attr]
+                return f"{ms.score}/100 {ms.emoji}"
+            except Exception:  # noqa: BLE001
+                return "—"
+
         rows = [
             ("💰 Price", _price(sig1), _price(sig2)),
             ("📉 RSI(14)", _rsi(sig1), _rsi(sig2)),
             ("📊 MACD", _macd(sig1), _macd(sig2)),
+            ("⚡ Momentum", _momentum(sig1), _momentum(sig2)),
             ("📐 Fibonacci", _fib(sig1), _fib(sig2)),
             ("📈 P/E", _pe(prof1), _pe(prof2)),
             ("💵 EPS", _eps(prof1), _eps(prof2)),
@@ -696,6 +773,239 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     ]
 
     await msg_obj.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+_TICKER_RE = re.compile(r"^[A-Z.\-]{1,10}$")
+
+
+async def cmd_setalert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /setalert TICKER PRICE — set a price alert for a ticker.
+
+    Auto-detects PRICE_ABOVE vs PRICE_BELOW based on current price.
+    Stores alert in PostgreSQL UserAlert table.
+    """
+    msg_obj = update.message
+    if not msg_obj:
+        return
+
+    if not context.args or len(context.args) < 2:
+        await msg_obj.reply_text(
+            "❗ Usage: /setalert TICKER PRICE\nExample: <code>/setalert AAPL 220</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    raw_ticker = context.args[0].upper().strip()
+    if not _TICKER_RE.match(raw_ticker):
+        await msg_obj.reply_text("❗ Invalid ticker symbol.", parse_mode=ParseMode.HTML)
+        return
+
+    try:
+        threshold = float(context.args[1])
+        if threshold <= 0:
+            raise ValueError("non-positive")
+    except (ValueError, IndexError):
+        await msg_obj.reply_text(
+            "❗ Invalid price. Use a positive number.\nExample: <code>/setalert AAPL 220</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    chat_id = str(msg_obj.chat_id)
+
+    # Determine alert type by comparing to current price
+    try:
+        signal = await _quant_engine.analyze(raw_ticker)
+        current_price = signal.price
+    except Exception as exc:
+        await msg_obj.reply_text(
+            f"❌ Failed to fetch current price for <b>{html.escape(raw_ticker)}</b>: "
+            f"<code>{html.escape(str(exc)[:80])}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    alert_type = "PRICE_ABOVE" if threshold > current_price else "PRICE_BELOW"
+    direction = "rises above" if alert_type == "PRICE_ABOVE" else "falls below"
+
+    from decimal import Decimal
+
+    async with AsyncSessionLocal() as session:
+        from sqlalchemy import select as _select
+
+        # Deactivate any existing alert for same chat + ticker
+        stmt = _select(UserAlert).where(
+            UserAlert.chat_id == chat_id,
+            UserAlert.ticker == raw_ticker,
+            UserAlert.is_active.is_(True),
+        )
+        existing = (await session.execute(stmt)).scalars().all()
+        for old_alert in existing:
+            old_alert.is_active = False
+
+        new_alert = UserAlert(
+            chat_id=chat_id,
+            ticker=raw_ticker,
+            alert_type=alert_type,
+            threshold=Decimal(str(threshold)),
+            is_active=True,
+        )
+        session.add(new_alert)
+        await session.commit()
+
+    await msg_obj.reply_text(
+        f"🔔 <b>Alert set for {html.escape(raw_ticker)}</b>\n"
+        f"  I'll notify you when the price {direction} <code>${threshold:,.2f}</code>\n"
+        f"  (Current price: <code>${current_price:,.2f}</code>)",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def cmd_myalerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /myalerts — list active price alerts for this chat."""
+    msg_obj = update.message
+    if not msg_obj:
+        return
+
+    chat_id = str(msg_obj.chat_id)
+    from sqlalchemy import select as _select
+
+    async with AsyncSessionLocal() as session:
+        stmt = _select(UserAlert).where(
+            UserAlert.chat_id == chat_id,
+            UserAlert.is_active.is_(True),
+        )
+        alerts = (await session.execute(stmt)).scalars().all()
+
+    if not alerts:
+        await msg_obj.reply_text(
+            "📭 You have no active price alerts.\n\nSet one with: <code>/setalert AAPL 220</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    lines = ["🔔 <b>Your Active Alerts:</b>", ""]
+    for alert in alerts:
+        direction = "↑ Above" if alert.alert_type == "PRICE_ABOVE" else "↓ Below"
+        lines.append(
+            f"  • <b>{html.escape(alert.ticker)}</b>  {direction}  "
+            f"<code>${float(alert.threshold):,.2f}</code>"
+        )
+    lines += ["", "To cancel: <code>/cancelalert TICKER</code>"]
+    await msg_obj.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+async def cmd_cancelalert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /cancelalert TICKER — deactivate price alert for a ticker."""
+    msg_obj = update.message
+    if not msg_obj:
+        return
+
+    if not context.args:
+        await msg_obj.reply_text(
+            "❗ Usage: /cancelalert TICKER\nExample: <code>/cancelalert AAPL</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    raw_ticker = context.args[0].upper().strip()
+    if not _TICKER_RE.match(raw_ticker):
+        await msg_obj.reply_text("❗ Invalid ticker symbol.", parse_mode=ParseMode.HTML)
+        return
+
+    chat_id = str(msg_obj.chat_id)
+    from sqlalchemy import select as _select
+
+    async with AsyncSessionLocal() as session:
+        stmt = _select(UserAlert).where(
+            UserAlert.chat_id == chat_id,
+            UserAlert.ticker == raw_ticker,
+            UserAlert.is_active.is_(True),
+        )
+        alerts = (await session.execute(stmt)).scalars().all()
+        if not alerts:
+            await msg_obj.reply_text(
+                f"❌ No active alert found for <b>{html.escape(raw_ticker)}</b>.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        for alert in alerts:
+            alert.is_active = False
+        await session.commit()
+
+    await msg_obj.reply_text(
+        f"✅ Alert cancelled for <b>{html.escape(raw_ticker)}</b>.",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def _job_check_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Scheduled job: check all active price alerts every 5 min during market hours."""
+    mkt = market_status()
+    if not mkt.get("nyse_open"):
+        return
+
+    from sqlalchemy import select as _select
+
+    async with AsyncSessionLocal() as session:
+        stmt = _select(UserAlert).where(UserAlert.is_active.is_(True))
+        alerts = (await session.execute(stmt)).scalars().all()
+
+    if not alerts:
+        return
+
+    # Group by ticker to avoid redundant fetches
+    ticker_alerts: dict[str, list[UserAlert]] = {}
+    for alert in alerts:
+        ticker_alerts.setdefault(alert.ticker, []).append(alert)
+
+    for ticker, ticker_alert_list in ticker_alerts.items():
+        try:
+            signal = await _quant_engine.analyze(ticker)
+            price = signal.price
+        except Exception as _exc:  # noqa: BLE001
+            logger.debug("alert_price_fetch_failed", ticker=ticker, error=str(_exc))
+            continue
+
+        for alert in ticker_alert_list:
+            try:
+                threshold_f = float(alert.threshold)
+                triggered = (
+                    alert.alert_type == "PRICE_ABOVE" and price >= threshold_f
+                ) or (alert.alert_type == "PRICE_BELOW" and price <= threshold_f)
+
+                if not triggered:
+                    continue
+
+                direction = (
+                    "risen above"
+                    if alert.alert_type == "PRICE_ABOVE"
+                    else "fallen below"
+                )
+                await context.bot.send_message(
+                    chat_id=alert.chat_id,
+                    text=(
+                        f"🔔 <b>Price Alert — {html.escape(ticker)}</b>\n"
+                        f"  Price has <b>{direction}</b> your target of "
+                        f"<code>${threshold_f:,.2f}</code>\n"
+                        f"  Current price: <code>${price:,.2f}</code>"
+                    ),
+                    parse_mode=ParseMode.HTML,
+                )
+
+                # Mark as triggered
+                async with AsyncSessionLocal() as upd_session:
+                    from sqlalchemy import select as _sel2
+
+                    stmt2 = _sel2(UserAlert).where(UserAlert.id == alert.id)
+                    row = (await upd_session.execute(stmt2)).scalar_one_or_none()
+                    if row:
+                        row.is_active = False
+                        row.triggered_at = datetime.now(tz=UTC)
+                    await upd_session.commit()
+
+            except Exception:  # noqa: BLE001
+                logger.warning("alert_check_failed", ticker=ticker, alert_id=alert.id)
 
 
 async def cmd_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -998,6 +1308,7 @@ async def send_market_close_report(app: Application) -> None:
     rsi_map: dict[str, float | None] = {}
     macd_map: dict[str, float] = {}
     signals_list = []
+    df_map: dict[str, object] = {}  # ticker → DataFrame for momentum score
 
     for ticker in watchlist:
         try:
@@ -1015,6 +1326,12 @@ async def send_market_close_report(app: Application) -> None:
             rsi_map[ticker] = rsi_v
             macd_map[ticker] = macd_hist
             signals_list.append(signal)
+            try:
+                df_map[ticker] = await _quant_engine.fetch_price_data(
+                    ticker, period="1y", interval="1d"
+                )
+            except Exception as _df_exc:  # noqa: BLE001
+                logger.debug("close_df_fetch_failed", ticker=ticker, error=str(_df_exc))
             line = (
                 f"  • <b>{ticker}</b>: <code>${signal.price:,.2f}</code>  "
                 f"{pct_arrow} {pct_sign}{pct:.2f}%"
@@ -1041,6 +1358,40 @@ async def send_market_close_report(app: Application) -> None:
             f"🏆 <b>Best:</b> {winner} {w_sign}{valid_pct[winner]:.2f}%   "
             f"💔 <b>Worst:</b> {loser} {l_sign}{valid_pct[loser]:.2f}%",
         ]
+
+    # Best Momentum Today
+    try:
+        import pandas as _pd_close
+
+        momentum_scores: dict[str, int] = {}
+        for ticker, sig in zip(watchlist, signals_list, strict=False):
+            if sig is None:
+                continue
+            df_c = df_map.get(ticker)
+            price_series = (
+                df_c["Close"].squeeze()
+                if df_c is not None
+                else _pd_close.Series(dtype=float)
+            )
+            ms = momentum_score(sig.signals, price_series)
+            momentum_scores[ticker] = ms.score
+        if momentum_scores:
+            best_ms_ticker = max(momentum_scores, key=momentum_scores.get)  # type: ignore[arg-type]
+            best_ms_score = momentum_scores[best_ms_ticker]
+            best_ms_obj = momentum_score(
+                next(s for t, s in zip(watchlist, signals_list, strict=False) if t == best_ms_ticker and s is not None).signals,  # type: ignore[union-attr]
+                (
+                    df_map.get(best_ms_ticker, _pd_close.DataFrame())["Close"].squeeze()
+                    if best_ms_ticker in df_map
+                    else _pd_close.Series(dtype=float)
+                ),
+            )
+            lines += [
+                "",
+                f"🏆 <b>Best Momentum Today:</b> {best_ms_ticker} — <code>{best_ms_score}/100</code> {best_ms_obj.emoji} {best_ms_obj.label}",
+            ]
+    except Exception:  # noqa: BLE001
+        logger.debug("close_momentum_failed")
 
     # RSI summary
     overbought = [t for t, r in rsi_map.items() if r and r > 70]
@@ -1352,6 +1703,9 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("fibonacci", cmd_fibonacci))
     app.add_handler(CommandHandler("compare", cmd_compare))
     app.add_handler(CommandHandler("health", cmd_health))
+    app.add_handler(CommandHandler("setalert", cmd_setalert))
+    app.add_handler(CommandHandler("myalerts", cmd_myalerts))
+    app.add_handler(CommandHandler("cancelalert", cmd_cancelalert))
     app.add_handler(CallbackQueryHandler(callback_handler))
     # Fallback handler must be LAST — catches all unrecognized text messages
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cmd_fallback))
@@ -1373,6 +1727,13 @@ def build_application() -> Application:
             time=dt_time(16, 15, tzinfo=tz_us),
             days=(0, 1, 2, 3, 4),
             name="nyse_close",
+        )
+        # Every 5 min Mon–Fri — check active price alerts during market hours
+        jq.run_repeating(
+            _job_check_alerts,
+            interval=300,
+            first=10,
+            name="price_alerts",
         )
 
     return app

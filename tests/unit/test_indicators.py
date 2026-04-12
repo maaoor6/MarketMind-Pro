@@ -3,7 +3,17 @@
 import numpy as np
 import pandas as pd
 import pytest
-from src.quant.indicators import all_moving_averages, ema, macd, rsi, sma, volume_spike
+from src.quant.indicators import (
+    MomentumScore,
+    all_moving_averages,
+    ema,
+    generate_signals,
+    macd,
+    momentum_score,
+    rsi,
+    sma,
+    volume_spike,
+)
 
 # ── Fixtures ──────────────────────────────────────────────────────────
 
@@ -246,3 +256,117 @@ def test_sma_150_in_all_moving_averages():
     ema_150_last = float(result["EMA_150"].dropna().iloc[-1])
     assert sma_150_last > 0
     assert ema_150_last > 0
+
+
+# ── Momentum Score Tests ─────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def strong_signals() -> dict:
+    """Signals dict representing a strongly trending stock."""
+    return {
+        "price": 210.0,
+        "rsi": 65.0,
+        "rsi_signal": "NEUTRAL",
+        "macd_histogram": 0.5,
+        "volume_spike": True,
+        "moving_averages": {"SMA_200": 180.0},
+    }
+
+
+@pytest.fixture
+def weak_signals() -> dict:
+    """Signals dict representing a weak/falling stock."""
+    return {
+        "price": 90.0,
+        "rsi": 28.0,
+        "rsi_signal": "OVERSOLD",
+        "macd_histogram": -0.3,
+        "volume_spike": False,
+        "moving_averages": {"SMA_200": 120.0},
+    }
+
+
+@pytest.mark.unit
+def test_momentum_score_returns_dataclass(strong_signals):
+    prices = pd.Series(range(1, 260), dtype=float)
+    result = momentum_score(strong_signals, prices)
+    assert isinstance(result, MomentumScore)
+    assert 0 <= result.score <= 100
+    assert result.label in {"Very Strong", "Strong", "Neutral", "Weak", "Very Weak"}
+    assert result.emoji in {"🔥", "🟢", "🟡", "🟠", "🔴"}
+    assert isinstance(result.breakdown, dict)
+
+
+@pytest.mark.unit
+def test_momentum_score_strong_stock(strong_signals):
+    """Stock above SMA200, RSI in 50-70, MACD bullish, volume spike, 5d gain → high score."""
+    prices = pd.Series(list(range(200, 260)), dtype=float)  # steady uptrend
+    result = momentum_score(strong_signals, prices)
+    # Expected: RSI 65→15, SMA200 above→20, MACD>0→20, spike→20, 5d>3%→20 = 95
+    assert result.score >= 75
+    assert result.label in {"Very Strong", "Strong"}
+
+
+@pytest.mark.unit
+def test_momentum_score_weak_stock(weak_signals):
+    """Stock below SMA200, RSI<40, MACD bearish, no spike → low score."""
+    prices = pd.Series(list(range(130, 70, -1)), dtype=float)  # steady downtrend
+    result = momentum_score(weak_signals, prices)
+    assert result.score <= 20
+    assert result.label in {"Weak", "Very Weak"}
+
+
+@pytest.mark.unit
+def test_momentum_score_empty_prices(strong_signals):
+    """Empty price series → 5d change component defaults to 0 but no crash."""
+    result = momentum_score(strong_signals, pd.Series(dtype=float))
+    assert isinstance(result, MomentumScore)
+    assert result.breakdown["5d_change"] == 0
+
+
+@pytest.mark.unit
+def test_momentum_score_breakdown_sums_to_total(strong_signals):
+    prices = pd.Series(range(1, 260), dtype=float)
+    result = momentum_score(strong_signals, prices)
+    assert sum(result.breakdown.values()) == result.score
+
+
+@pytest.mark.unit
+def test_momentum_score_all_components_present(strong_signals):
+    prices = pd.Series(range(1, 260), dtype=float)
+    result = momentum_score(strong_signals, prices)
+    for key in ("rsi", "sma200", "macd", "volume", "5d_change"):
+        assert key in result.breakdown
+
+
+@pytest.mark.unit
+def test_momentum_score_very_strong_label():
+    """All 5 components at max → score 100, Very Strong."""
+    # prices[-6] = 150, price = 210 → +40% 5d change → 20 pts
+    prices = pd.Series(
+        [100.0, 120.0, 130.0, 140.0, 145.0, 150.0, 155.0, 160.0, 180.0, 200.0, 210.0]
+    )
+    signals = {
+        "price": 210.0,  # current price (above SMA200=100)
+        "rsi": 75.0,  # > 70 → 20 pts
+        "rsi_signal": "OVERBOUGHT",
+        "macd_histogram": 1.0,  # > 0 → 20 pts
+        "volume_spike": True,  # → 20 pts
+        "moving_averages": {"SMA_200": 100.0},  # price 210 > 100 → 20 pts
+    }
+    result = momentum_score(signals, prices)
+    assert result.score == 100
+    assert result.label == "Very Strong"
+    assert result.emoji == "🔥"
+
+
+@pytest.mark.unit
+def test_momentum_score_from_generate_signals():
+    """Verify momentum_score works end-to-end with output of generate_signals."""
+    prices = pd.Series(range(1, 260), dtype=float)
+    volume = pd.Series([1_000_000] * 259, dtype=float)
+    sigs = generate_signals(prices, volume)
+    result = momentum_score(sigs, prices)
+    assert isinstance(result, MomentumScore)
+    assert 0 <= result.score <= 100

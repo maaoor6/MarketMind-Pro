@@ -144,6 +144,54 @@ class QuantEngine:
         )
         return result
 
+    async def analyze_timeframe(self, ticker: str, interval: str = "1wk") -> dict:
+        """Fetch RSI + MACD direction for a single timeframe.
+
+        Uses 1y of data for weekly, 5y for monthly to ensure enough bars.
+        Results are cached under quote:{ticker}:{interval} with a 1-hour TTL.
+
+        Args:
+            ticker: Ticker symbol.
+            interval: yfinance interval string: '1wk' or '1mo'.
+
+        Returns:
+            Dict with keys: interval, rsi, rsi_signal, macd_bullish.
+            On failure returns a dict with interval key and all others None.
+        """
+        cache_key = f"quote:{ticker.upper()}:{interval}"
+        cached = await cache.get(cache_key)
+        if cached and "rsi" in cached:
+            logger.debug("timeframe_cache_hit", ticker=ticker, interval=interval)
+            return cached
+
+        period = "5y" if interval == "1mo" else "2y"
+        try:
+            df = await self.fetch_price_data(ticker, period=period, interval=interval)
+            closes = df["Close"].squeeze()
+            volumes = df["Volume"].squeeze()
+            sigs = generate_signals(closes, volumes)
+            result = {
+                "interval": interval,
+                "rsi": sigs.get("rsi"),
+                "rsi_signal": sigs.get("rsi_signal", "NEUTRAL"),
+                "macd_bullish": (sigs.get("macd_histogram", 0) or 0) > 0,
+            }
+            await cache.set(cache_key, result, ttl=3600)
+            return result
+        except Exception as exc:
+            logger.warning(
+                "timeframe_fetch_failed",
+                ticker=ticker,
+                interval=interval,
+                error=str(exc),
+            )
+            return {
+                "interval": interval,
+                "rsi": None,
+                "rsi_signal": "NEUTRAL",
+                "macd_bullish": None,
+            }
+
     async def health_check(self) -> dict[str, str]:
         """Agent health check."""
         try:

@@ -7,6 +7,16 @@ import pandas as pd
 
 
 @dataclass
+class MomentumScore:
+    """Composite momentum score derived from 5 technical indicators."""
+
+    score: int  # 0–100
+    label: str  # "Very Strong" | "Strong" | "Neutral" | "Weak" | "Very Weak"
+    emoji: str  # 🔥 🟢 🟡 🟠 🔴
+    breakdown: dict[str, int]  # component name → points awarded
+
+
+@dataclass
 class MACDResult:
     macd_line: pd.Series
     signal_line: pd.Series
@@ -178,3 +188,84 @@ def generate_signals(prices: pd.Series, volume: pd.Series) -> dict:
             k: float(v.iloc[-1]) for k, v in mas.items() if not v.empty
         },
     }
+
+
+def momentum_score(signals: dict, prices: pd.Series) -> MomentumScore:
+    """Compute a composite momentum score (0–100) from a generate_signals() dict.
+
+    Components (20 points each):
+      - RSI:        >70→20, 50–70→15, 40–50→10, <40→0
+      - SMA200:     price > SMA200 → 20, else 0
+      - MACD:       histogram > 0 → 20, else 0
+      - VolSpike:   volume_spike=True → 20, else 0
+      - 5d%Change:  >+3%→20, >+1%→15, >0→10, ≤0→0
+
+    Args:
+        signals: Dict returned by generate_signals().
+        prices:  Closing price series (at least 6 bars required for 5d change).
+
+    Returns:
+        MomentumScore dataclass.
+    """
+    breakdown: dict[str, int] = {}
+
+    # RSI component
+    rsi_val = signals.get("rsi")
+    if rsi_val is None:
+        rsi_pts = 0
+    elif rsi_val > 70:
+        rsi_pts = 20
+    elif rsi_val >= 50:
+        rsi_pts = 15
+    elif rsi_val >= 40:
+        rsi_pts = 10
+    else:
+        rsi_pts = 0
+    breakdown["rsi"] = rsi_pts
+
+    # SMA200 component
+    price = signals.get("price", 0.0)
+    sma200 = signals.get("moving_averages", {}).get("SMA_200")
+    sma200_pts = 20 if (sma200 is not None and price > sma200) else 0
+    breakdown["sma200"] = sma200_pts
+
+    # MACD component
+    macd_hist = signals.get("macd_histogram", 0) or 0
+    macd_pts = 20 if macd_hist > 0 else 0
+    breakdown["macd"] = macd_pts
+
+    # Volume spike component
+    vol_pts = 20 if signals.get("volume_spike", False) else 0
+    breakdown["volume"] = vol_pts
+
+    # 5-day % change component
+    if len(prices) >= 6:
+        price_5d_ago = float(prices.iloc[-6])
+        pct_5d = (price - price_5d_ago) / price_5d_ago * 100 if price_5d_ago else 0.0
+    else:
+        pct_5d = 0.0
+
+    if pct_5d > 3.0:
+        pct_pts = 20
+    elif pct_5d > 1.0:
+        pct_pts = 15
+    elif pct_5d > 0:
+        pct_pts = 10
+    else:
+        pct_pts = 0
+    breakdown["5d_change"] = pct_pts
+
+    total = sum(breakdown.values())
+
+    if total >= 80:
+        label, emoji = "Very Strong", "🔥"
+    elif total >= 60:
+        label, emoji = "Strong", "🟢"
+    elif total >= 40:
+        label, emoji = "Neutral", "🟡"
+    elif total >= 20:
+        label, emoji = "Weak", "🟠"
+    else:
+        label, emoji = "Very Weak", "🔴"
+
+    return MomentumScore(score=total, label=label, emoji=emoji, breakdown=breakdown)

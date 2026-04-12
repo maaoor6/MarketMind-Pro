@@ -69,6 +69,8 @@ class CompanyProfile:
     currency: str  # 'USD' or 'ILS'
     employees: int | None = None
     exchange: str = "N/A"
+    short_pct: float | None = None  # e.g. 0.023 = 2.3% of float shorted
+    short_ratio: float | None = None  # days to cover
 
 
 @dataclass
@@ -180,6 +182,8 @@ async def fetch_company_profile(ticker: str) -> CompanyProfile:
         currency="ILS" if ticker.upper().endswith(".TA") else "USD",
         employees=_int("fullTimeEmployees"),
         exchange=exchange,
+        short_pct=_float("shortPercentOfFloat"),
+        short_ratio=_float("shortRatio"),
     )
 
     await cache.set(cache_key, dataclasses.asdict(profile), ttl=FUNDAMENTALS_CACHE_TTL)
@@ -705,6 +709,16 @@ def format_profile_english(profile: CompanyProfile) -> str:
         f"  🎯 Analyst Target: <code>${_fmt_float(profile.target_price_mean)}</code>",
         "",
         f"📈 52-Week Range: <code>${_fmt_float(profile.week_52_low)}</code> – <code>${_fmt_float(profile.week_52_high)}</code>",
+        (
+            f"📉 Short Interest: <code>{_fmt_pct(profile.short_pct)}</code> of float"
+            + (
+                f"  |  Days to Cover: <code>{profile.short_ratio:.1f}</code>"
+                if profile.short_ratio is not None
+                else ""
+            )
+            if profile.short_pct is not None
+            else ""
+        ),
         f"🆚 Competitors: {html.escape(comp_str)}",
     ]
     # Filter out empty lines at start
