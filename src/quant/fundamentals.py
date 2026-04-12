@@ -343,44 +343,45 @@ def _fetch_earnings_sync(ticker: str) -> EarningsReport | None:
     else:
         report_date = "N/A"
 
-    # --- quarterly earnings (EPS actual + estimate) ---
+    # --- EPS + Revenue from quarterly_income_stmt (new yfinance API) ---
     eps_actual: float | None = None
     eps_estimate: float | None = None
+    revenue_actual: float | None = None
     quarter_label = "Latest Quarter"
     try:
-        qe = t.quarterly_earnings
-        if qe is not None and not qe.empty:
-            row = qe.iloc[0]
-            eps_actual = (
-                float(row["Earnings"]) if pd.notna(row.get("Earnings")) else None
-            )
-            eps_estimate = (
-                float(row["EPS Estimate"])
-                if pd.notna(row.get("EPS Estimate"))
-                else None
-            )
-            # Build quarter label from index (Timestamp or string)
-            idx = qe.index[0]
+        qi = t.quarterly_income_stmt
+        if qi is not None and not qi.empty:
+            # EPS actual
+            if "Diluted EPS" in qi.index:
+                v = qi.loc["Diluted EPS"].iloc[0]
+                if pd.notna(v):
+                    eps_actual = float(v)
+            # Revenue actual
+            for rev_key in ("Total Revenue", "Operating Revenue"):
+                if rev_key in qi.index:
+                    v = qi.loc[rev_key].iloc[0]
+                    if pd.notna(v):
+                        revenue_actual = float(v)
+                        break
+            # Quarter label from column timestamp
             try:
-                q_dt = pd.Timestamp(idx)
-                month = q_dt.month
-                q_num = (month - 1) // 3 + 1
+                q_dt = pd.Timestamp(qi.columns[0])
+                q_num = (q_dt.month - 1) // 3 + 1
                 quarter_label = f"Q{q_num} {q_dt.year}"
             except Exception:  # noqa: BLE001
-                quarter_label = str(idx)
+                quarter_label = str(qi.columns[0])
     except Exception:  # noqa: BLE001
-        logger.debug("earnings_quarterly_parse_failed", ticker=ticker)
+        logger.debug("earnings_income_stmt_failed", ticker=ticker)
 
-    # --- revenue actual from quarterly_financials ---
-    revenue_actual: float | None = None
+    # --- EPS estimate: prefer trailingEps as quarterly proxy (annual / 4) ---
+    # Note: yfinance does not expose per-quarter analyst EPS estimates freely.
+    # We use trailingEps / 4 as a rough quarterly benchmark only when no better source exists.
     try:
-        qf = t.quarterly_financials
-        if qf is not None and not qf.empty and "Total Revenue" in qf.index:
-            v = qf.loc["Total Revenue"].iloc[0]
-            if pd.notna(v):
-                revenue_actual = float(v)
+        trailing = info.get("trailingEps")
+        if trailing is not None:
+            eps_estimate = round(float(trailing) / 4, 2)
     except Exception:  # noqa: BLE001
-        logger.debug("earnings_revenue_parse_failed", ticker=ticker)
+        logger.debug("earnings_eps_estimate_failed", ticker=ticker)
 
     # --- revenue estimate from calendar ---
     revenue_estimate: float | None = None
