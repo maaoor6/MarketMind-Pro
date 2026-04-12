@@ -4,7 +4,7 @@ import asyncio
 import dataclasses
 import html
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pandas as pd
 import yfinance as yf
@@ -19,6 +19,7 @@ from src.utils.timezone_utils import TZ_UTC
 logger = get_logger(__name__)
 
 FUNDAMENTALS_CACHE_TTL = 14400  # 4 hours
+EARNINGS_CACHE_TTL = 3600  # 1 hour
 
 # ── Competitor static map ─────────────────────────────────────────────────────
 
@@ -68,6 +69,25 @@ class CompanyProfile:
     currency: str  # 'USD' or 'ILS'
     employees: int | None = None
     exchange: str = "N/A"
+
+
+@dataclass
+class EarningsReport:
+    """Latest quarterly earnings report for a ticker."""
+
+    ticker: str
+    quarter: str  # e.g. "Q1 2026"
+    report_date: str  # e.g. "Apr 3, 2026"
+    eps_actual: float | None
+    eps_estimate: float | None
+    eps_surprise_pct: float | None  # (actual - est) / |est| * 100
+    revenue_actual: float | None  # raw dollars
+    revenue_estimate: float | None
+    revenue_surprise_pct: float | None
+    revenue_growth_yoy: float | None  # e.g. 0.051 = 5.1%
+    gross_margin: float | None  # e.g. 0.463 = 46.3%
+    beat_eps: bool | None  # True=beat, False=miss, None=no estimate
+    beat_revenue: bool | None
 
 
 @dataclass
@@ -304,6 +324,226 @@ async def save_insider_transactions(ticker: str, txns: list[InsiderTx]) -> int:
     return inserted
 
 
+# ── Earnings ─────────────────────────────────────────────────────────────────
+
+
+def _fetch_earnings_sync(ticker: str) -> EarningsReport | None:
+    """Synchronous yfinance fetch — must be called via run_in_executor."""
+    t = yf.Ticker(ticker)
+
+    # --- report date from earningsTimestamp ---
+    info = t.info or {}
+    ts = info.get("earningsTimestamp")
+    if ts:
+        try:
+            report_dt = datetime.fromtimestamp(ts, tz=UTC)
+            report_date = report_dt.strftime("%b %-d, %Y")
+        except Exception:
+            report_date = "N/A"
+    else:
+        report_date = "N/A"
+
+    # --- quarterly earnings (EPS actual + estimate) ---
+    eps_actual: float | None = None
+    eps_estimate: float | None = None
+    quarter_label = "Latest Quarter"
+    try:
+        qe = t.quarterly_earnings
+        if qe is not None and not qe.empty:
+            row = qe.iloc[0]
+            eps_actual = (
+                float(row["Earnings"]) if pd.notna(row.get("Earnings")) else None
+            )
+            eps_estimate = (
+                float(row["EPS Estimate"])
+                if pd.notna(row.get("EPS Estimate"))
+                else None
+            )
+            # Build quarter label from index (Timestamp or string)
+            idx = qe.index[0]
+            try:
+                q_dt = pd.Timestamp(idx)
+                month = q_dt.month
+                q_num = (month - 1) // 3 + 1
+                quarter_label = f"Q{q_num} {q_dt.year}"
+            except Exception:  # noqa: BLE001
+                quarter_label = str(idx)
+    except Exception:  # noqa: BLE001
+        logger.debug("earnings_quarterly_parse_failed", ticker=ticker)
+
+    # --- revenue actual from quarterly_financials ---
+    revenue_actual: float | None = None
+    try:
+        qf = t.quarterly_financials
+        if qf is not None and not qf.empty and "Total Revenue" in qf.index:
+            v = qf.loc["Total Revenue"].iloc[0]
+            if pd.notna(v):
+                revenue_actual = float(v)
+    except Exception:  # noqa: BLE001
+        logger.debug("earnings_revenue_parse_failed", ticker=ticker)
+
+    # --- revenue estimate from calendar ---
+    revenue_estimate: float | None = None
+    try:
+        cal = t.calendar
+        if cal is not None and not cal.empty and "Revenue Estimate" in cal.index:
+            v = cal.loc["Revenue Estimate"].iloc[0]
+            if pd.notna(v):
+                revenue_estimate = float(v)
+    except Exception:  # noqa: BLE001
+        logger.debug("earnings_calendar_revenue_failed", ticker=ticker)
+
+    # --- macro metrics from info ---
+    def _f(key: str) -> float | None:
+        v = info.get(key)
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    revenue_growth_yoy = _f("revenueGrowth")
+    gross_margin = _f("grossMargins")
+
+    # --- beat/miss and surprise ---
+    eps_surprise_pct: float | None = None
+    beat_eps: bool | None = None
+    if eps_actual is not None and eps_estimate is not None and eps_estimate != 0:
+        eps_surprise_pct = round(
+            (eps_actual - eps_estimate) / abs(eps_estimate) * 100, 2
+        )
+        beat_eps = eps_actual >= eps_estimate
+
+    revenue_surprise_pct: float | None = None
+    beat_revenue: bool | None = None
+    if (
+        revenue_actual is not None
+        and revenue_estimate is not None
+        and revenue_estimate != 0
+    ):
+        revenue_surprise_pct = round(
+            (revenue_actual - revenue_estimate) / abs(revenue_estimate) * 100, 2
+        )
+        beat_revenue = revenue_actual >= revenue_estimate
+
+    # Require at least EPS or Revenue to return a report
+    if eps_actual is None and revenue_actual is None:
+        return None
+
+    return EarningsReport(
+        ticker=ticker.upper(),
+        quarter=quarter_label,
+        report_date=report_date,
+        eps_actual=eps_actual,
+        eps_estimate=eps_estimate,
+        eps_surprise_pct=eps_surprise_pct,
+        revenue_actual=revenue_actual,
+        revenue_estimate=revenue_estimate,
+        revenue_surprise_pct=revenue_surprise_pct,
+        revenue_growth_yoy=revenue_growth_yoy,
+        gross_margin=gross_margin,
+        beat_eps=beat_eps,
+        beat_revenue=beat_revenue,
+    )
+
+
+async def fetch_earnings_report(ticker: str) -> EarningsReport | None:
+    """Fetch latest quarterly earnings report for a ticker.
+
+    Results cached in Redis for 1 hour.
+
+    Args:
+        ticker: Ticker symbol (e.g., 'AAPL').
+
+    Returns:
+        EarningsReport or None if no data available.
+    """
+    cache_key = f"earnings:{ticker.upper()}"
+    cached = await cache.get(cache_key)
+    if cached:
+        logger.debug("earnings_cache_hit", ticker=ticker)
+        return EarningsReport(**cached)
+
+    loop = asyncio.get_event_loop()
+    try:
+        report = await loop.run_in_executor(None, _fetch_earnings_sync, ticker)
+    except Exception as exc:
+        logger.warning("earnings_fetch_failed", ticker=ticker, error=str(exc))
+        return None
+
+    if report is None:
+        return None
+
+    await cache.set(cache_key, dataclasses.asdict(report), ttl=EARNINGS_CACHE_TTL)
+    logger.info("earnings_fetched", ticker=ticker, quarter=report.quarter)
+    return report
+
+
+def was_reported_today(ticker: str) -> bool:
+    """Return True if the ticker reported earnings today (sync — use run_in_executor).
+
+    Args:
+        ticker: Ticker symbol.
+
+    Returns:
+        True if earningsTimestamp matches today's date.
+    """
+    try:
+        info = yf.Ticker(ticker).info or {}
+        ts = info.get("earningsTimestamp")
+        if not ts:
+            return False
+        report_dt = datetime.fromtimestamp(ts, tz=UTC)
+        today = datetime.now(tz=UTC).date()
+        return report_dt.date() == today
+    except Exception:
+        return False
+
+
+def is_reporting_today(ticker: str) -> tuple[bool, float | None, float | None]:
+    """Return (is_today, eps_estimate, revenue_estimate) from ticker.calendar (sync).
+
+    Args:
+        ticker: Ticker symbol.
+
+    Returns:
+        Tuple of (is_reporting_today, eps_estimate, revenue_estimate).
+    """
+    try:
+        t = yf.Ticker(ticker)
+        cal = t.calendar
+        if cal is None or cal.empty:
+            return False, None, None
+        # calendar index: "Earnings Date", "Earnings Average", "Revenue Average", etc.
+        date_row = cal.loc["Earnings Date"] if "Earnings Date" in cal.index else None
+        if date_row is None:
+            return False, None, None
+        # date_row may have multiple columns (low/high estimate)
+        today = datetime.now(tz=UTC).date()
+        for val in date_row.values:
+            try:
+                if pd.Timestamp(val).date() == today:
+                    eps_est = None
+                    rev_est = None
+                    for key in ["Earnings Average", "EPS Estimate"]:
+                        if key in cal.index:
+                            v = cal.loc[key].iloc[0]
+                            if pd.notna(v):
+                                eps_est = float(v)
+                                break
+                    for key in ["Revenue Average", "Revenue Estimate"]:
+                        if key in cal.index:
+                            v = cal.loc[key].iloc[0]
+                            if pd.notna(v):
+                                rev_est = float(v)
+                                break
+                    return True, eps_est, rev_est
+            except Exception:  # noqa: BLE001, S112
+                continue
+        return False, None, None
+    except Exception:  # noqa: BLE001
+        return False, None, None
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
@@ -345,6 +585,88 @@ def _fmt_pct(val: float | None) -> str:
 
 
 # ── English formatters ────────────────────────────────────────────────────────
+
+
+def _fmt_revenue(v: float | None) -> str:
+    """Format raw revenue value to human-readable string."""
+    if v is None:
+        return "N/A"
+    if v >= 1e9:
+        return f"${v / 1e9:.1f}B"
+    if v >= 1e6:
+        return f"${v / 1e6:.0f}M"
+    return f"${v:,.0f}"
+
+
+def format_earnings_english(
+    report: EarningsReport,
+    headlines: list[dict] | None = None,
+) -> str:
+    """Format an EarningsReport as an English HTML string for Telegram.
+
+    Args:
+        report: EarningsReport dataclass.
+        headlines: Optional list of news headline dicts with keys title/source.
+
+    Returns:
+        HTML-formatted string.
+    """
+
+    def _beat(flag: bool | None, surprise: float | None) -> str:
+        if flag is None:
+            return ""
+        sign = "✅ Beat" if flag else "❌ Miss"
+        if surprise is not None:
+            pct_sign = "+" if surprise >= 0 else ""
+            return f"  {sign} {pct_sign}{surprise:.1f}%"
+        return f"  {sign}"
+
+    lines = [
+        f"📅 <b>{html.escape(report.quarter)} Earnings</b> — Reported {html.escape(report.report_date)}",
+        "━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    # EPS line
+    if report.eps_actual is not None:
+        eps_line = f"💰 EPS:      <code>${report.eps_actual:.2f}</code> actual"
+        if report.eps_estimate is not None:
+            eps_line += f"  vs  <code>${report.eps_estimate:.2f}</code> est"
+        eps_line += _beat(report.beat_eps, report.eps_surprise_pct)
+        lines.append(eps_line)
+
+    # Revenue line
+    if report.revenue_actual is not None:
+        rev_line = (
+            f"📦 Revenue:  <code>{_fmt_revenue(report.revenue_actual)}</code> actual"
+        )
+        if report.revenue_estimate is not None:
+            rev_line += (
+                f"  vs  <code>{_fmt_revenue(report.revenue_estimate)}</code> est"
+            )
+        rev_line += _beat(report.beat_revenue, report.revenue_surprise_pct)
+        lines.append(rev_line)
+
+    # YoY Growth + Gross Margin
+    growth_parts = []
+    if report.revenue_growth_yoy is not None:
+        sign = "+" if report.revenue_growth_yoy >= 0 else ""
+        growth_parts.append(f"Revenue {sign}{report.revenue_growth_yoy * 100:.1f}%")
+    if report.gross_margin is not None:
+        growth_parts.append(f"Gross Margin {report.gross_margin * 100:.1f}%")
+    if growth_parts:
+        lines.append(f"📈 YoY Growth: {' | '.join(growth_parts)}")
+
+    # News headlines about earnings
+    if headlines:
+        for h in headlines[:5]:
+            title = html.escape(h.get("title", "")[:80])
+            source = html.escape(h.get("source", ""))
+            line = f'📰 <i>"{title}…"</i>'
+            if source:
+                line += f" — {source}"
+            lines.append(line)
+
+    return "\n".join(lines)
 
 
 def format_profile_english(profile: CompanyProfile) -> str:

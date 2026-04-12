@@ -22,11 +22,16 @@ from src.agents.quant_engine import QuantEngine
 from src.quant.fibonacci import calculate_fibonacci
 from src.quant.fundamentals import (
     CompanyProfile,
+    EarningsReport,
     fetch_company_profile,
+    fetch_earnings_report,
     fetch_insider_transactions,
+    format_earnings_english,
     format_insiders_english,
     format_profile_english,
+    is_reporting_today,
     save_insider_transactions,
+    was_reported_today,
 )
 from src.ui.publisher import PAGES_BASE_URL, publish_ticker_chart
 from src.utils.config import settings
@@ -168,17 +173,21 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             return
 
-        # ── Phase 2: Fundamentals + Insiders (parallel, best-effort) ──
+        # ── Phase 2: Fundamentals + Insiders + Earnings (parallel, best-effort) ──
         profile_result: CompanyProfile | Exception | None = None
         insiders_result: list = []
+        earnings_result: EarningsReport | None = None
         chart_url: str | None = None
 
         try:
-            profile_result, insiders_raw = await asyncio.gather(
+            profile_result, insiders_raw, earnings_result = await asyncio.gather(
                 fetch_company_profile(ticker),
                 fetch_insider_transactions(ticker),
+                fetch_earnings_report(ticker),
                 return_exceptions=True,
             )
+            if isinstance(earnings_result, Exception):
+                earnings_result = None
             if not isinstance(insiders_raw, Exception) and insiders_raw:
                 insiders_result = insiders_raw
                 task = asyncio.create_task(
@@ -305,6 +314,28 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # ── Insiders ──
         if insiders_result:
             lines.append(format_insiders_english(ticker, insiders_result))
+            lines.append("")
+
+        # ── Earnings Report ──
+        if earnings_result:
+            _earnings_kw = {
+                "earnings",
+                "beats",
+                "misses",
+                "results",
+                "revenue",
+                "eps",
+                "quarterly",
+                "profit",
+            }
+            earnings_headlines: list[dict] = []
+            if not isinstance(sentiment, Exception) and sentiment:
+                earnings_headlines = [
+                    h
+                    for h in sentiment.recent_headlines
+                    if any(kw in h.get("title", "").lower() for kw in _earnings_kw)
+                ][:5]
+            lines.append(format_earnings_english(earnings_result, earnings_headlines))
             lines.append("")
 
         # ── Sentiment / News ──
@@ -824,6 +855,33 @@ async def _job_market_preview(context: ContextTypes.DEFAULT_TYPE) -> None:
         mood_parts.append(f"VIX {vix_price:.1f} ({_vix_label(vix_price)})")
     mood_line = "  " + "   ·   ".join(mood_parts) if mood_parts else ""
 
+    # Check which watchlist stocks report earnings today
+    loop = asyncio.get_event_loop()
+
+    async def _earnings_warning(t: str) -> str:
+        try:
+            reporting, eps_est, rev_est = await loop.run_in_executor(
+                None, is_reporting_today, t
+            )
+            if not reporting:
+                return ""
+            parts = [f"⚠️ <b>Earnings Today:</b> {t} reports today"]
+            est_parts = []
+            if eps_est is not None:
+                est_parts.append(f"EPS est: <code>${eps_est:.2f}</code>")
+            if rev_est is not None:
+                est_parts.append(f"Revenue est: <code>{_fmt_rev(rev_est)}</code>")
+            if est_parts:
+                parts.append("   " + "  |  ".join(est_parts))
+            return "\n".join(parts)
+        except Exception:  # noqa: BLE001
+            return ""
+
+    earnings_warnings = await asyncio.gather(
+        *[_earnings_warning(t) for t in watchlist_preview]
+    )
+    earnings_warning_lines = [w for w in earnings_warnings if w]
+
     snapshot = await _fetch_market_snapshot()
     nyse_open_str = now_us().strftime("%I:%M %p ET")
     sections = [
@@ -835,6 +893,8 @@ async def _job_market_preview(context: ContextTypes.DEFAULT_TYPE) -> None:
     ]
     if mood_line:
         sections += ["", "📊 <b>Market Mood:</b>", mood_line]
+    if earnings_warning_lines:
+        sections += [""] + earnings_warning_lines
     sections.append(snapshot)
     msg = "\n".join(sections)
 
@@ -887,6 +947,30 @@ async def send_market_open_report(app: Application) -> None:
                 "market_open_report_ticker_failed", ticker=ticker, error=str(exc)
             )
             lines.append(f"• <b>{ticker}</b>: ❌ Failed")
+
+    # Earnings reported after-hours (yesterday/this morning)
+    open_loop = asyncio.get_event_loop()
+
+    async def _check_reported_open(t: str) -> tuple[str, EarningsReport] | None:
+        try:
+            reported = await open_loop.run_in_executor(None, was_reported_today, t)
+            if not reported:
+                return None
+            rep = await fetch_earnings_report(t)
+            if rep:
+                return (t, rep)
+        except Exception:  # noqa: BLE001
+            logger.debug("earnings_check_failed", ticker=t)
+        return None
+
+    open_reported = await asyncio.gather(
+        *[_check_reported_open(t) for t in watchlist], return_exceptions=True
+    )
+    earnings_just_in = [r for r in open_reported if r and not isinstance(r, Exception)]
+    if earnings_just_in:
+        lines += ["", "🔔 <b>Earnings Just In:</b>"]
+        for _ticker, rep in earnings_just_in:
+            lines.append(format_earnings_english(rep))
 
     snapshot = await _fetch_market_snapshot()
     lines.append(snapshot)
@@ -1002,6 +1086,30 @@ async def send_market_close_report(app: Application) -> None:
             watch_lines.append(f"  📶 <b>{ticker}</b> — MACD near zero cross")
     if watch_lines:
         lines += ["", "👀 <b>Watch Tomorrow:</b>", *watch_lines]
+
+    # Earnings reported today
+    close_loop = asyncio.get_event_loop()
+
+    async def _check_reported(t: str) -> tuple[str, EarningsReport] | None:
+        try:
+            reported = await close_loop.run_in_executor(None, was_reported_today, t)
+            if not reported:
+                return None
+            rep = await fetch_earnings_report(t)
+            if rep:
+                return (t, rep)
+        except Exception:  # noqa: BLE001
+            logger.debug("earnings_check_failed", ticker=t)
+        return None
+
+    reported_results = await asyncio.gather(
+        *[_check_reported(t) for t in watchlist], return_exceptions=True
+    )
+    earnings_today = [r for r in reported_results if r and not isinstance(r, Exception)]
+    if earnings_today:
+        lines += ["", "📋 <b>Earnings Today:</b>"]
+        for _ticker, rep in earnings_today:
+            lines.append(format_earnings_english(rep))
 
     snapshot = await _fetch_market_snapshot()
     lines.append(snapshot)
@@ -1210,6 +1318,15 @@ def _vix_label(vix: float) -> str:
     if vix < 35:
         return "😬 Elevated"
     return "😱 Extreme Fear"
+
+
+def _fmt_rev(v: float) -> str:
+    """Format raw revenue value for display in messages."""
+    if v >= 1e9:
+        return f"${v / 1e9:.1f}B"
+    if v >= 1e6:
+        return f"${v / 1e6:.0f}M"
+    return f"${v:,.0f}"
 
 
 def _sentiment_bar(score: float) -> str:
