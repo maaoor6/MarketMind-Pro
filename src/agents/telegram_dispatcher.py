@@ -109,6 +109,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  • /news <code>[TICKER]</code> — Top 5 live news headlines with summaries\n"
         "  • /compare <code>[T1] [T2]</code> — Side-by-side stock comparison\n"
         "  • /fibonacci <code>[TICKER]</code> — 52-week Fibonacci levels\n"
+        "  • /sectors — S&P 500 sector rotation (daily performance)\n"
         "  • /setalert <code>[TICKER] [PRICE]</code> — Set a price alert\n"
         "  • /myalerts — View your active alerts\n"
         "  • /cancelalert <code>[TICKER]</code> — Cancel an alert\n"
@@ -462,13 +463,17 @@ async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "⏳ Fetching market data...", parse_mode=ParseMode.HTML
         )
         try:
-            snapshot = await _fetch_market_snapshot()
+            snapshot, sectors = await asyncio.gather(
+                _fetch_market_snapshot(),
+                _fetch_sector_data(),
+            )
             header = (
                 "📰 <b>MARKET SNAPSHOT</b>\n"
                 f"🕐 {datetime.now(tz=_ET).strftime('%d/%m/%Y %H:%M')} ET\n"
                 "━━━━━━━━━━━━━━━━━━━"
             )
-            await msg_obj.reply_text(header + snapshot, parse_mode=ParseMode.HTML)
+            body = header + snapshot + _format_sector_block(sectors)
+            await msg_obj.reply_text(body, parse_mode=ParseMode.HTML)
         except Exception as exc:
             await msg_obj.reply_text(
                 f"❌ Failed to fetch market data: <code>{html.escape(str(exc))}</code>",
@@ -1192,7 +1197,10 @@ async def _job_market_preview(context: ContextTypes.DEFAULT_TYPE) -> None:
     )
     earnings_warning_lines = [w for w in earnings_warnings if w]
 
-    snapshot = await _fetch_market_snapshot()
+    snapshot, sectors = await asyncio.gather(
+        _fetch_market_snapshot(),
+        _fetch_sector_data(),
+    )
     nyse_open_str = now_us().strftime("%I:%M %p ET")
     sections = [
         "🌅 <b>Pre-Market Preview — NYSE opens in ~30 minutes</b>",
@@ -1206,6 +1214,9 @@ async def _job_market_preview(context: ContextTypes.DEFAULT_TYPE) -> None:
     if earnings_warning_lines:
         sections += [""] + earnings_warning_lines
     sections.append(snapshot)
+    sector_block = _format_sector_block(sectors)
+    if sector_block:
+        sections.append(sector_block)
     msg = "\n".join(sections)
 
     await context.bot.send_message(
@@ -1282,8 +1293,14 @@ async def send_market_open_report(app: Application) -> None:
         for _ticker, rep in earnings_just_in:
             lines.append(format_earnings_english(rep))
 
-    snapshot = await _fetch_market_snapshot()
+    snapshot, sectors = await asyncio.gather(
+        _fetch_market_snapshot(),
+        _fetch_sector_data(),
+    )
     lines.append(snapshot)
+    sector_block = _format_sector_block(sectors)
+    if sector_block:
+        lines.append(sector_block)
 
     await app.bot.send_message(
         chat_id=settings.telegram_chat_id,
@@ -1462,8 +1479,14 @@ async def send_market_close_report(app: Application) -> None:
         for _ticker, rep in earnings_today:
             lines.append(format_earnings_english(rep))
 
-    snapshot = await _fetch_market_snapshot()
+    snapshot, sectors = await asyncio.gather(
+        _fetch_market_snapshot(),
+        _fetch_sector_data(),
+    )
     lines.append(snapshot)
+    sector_block = _format_sector_block(sectors)
+    if sector_block:
+        lines.append(sector_block)
 
     await app.bot.send_message(
         chat_id=settings.telegram_chat_id,
@@ -1503,6 +1526,21 @@ _CURRENCY_VOL = {"DX-Y.NYB", "^VIX"}
 _FIXED_INCOME = {"TLT", "AGG"}
 _COMMODITY = {"GLD", "SLV", "USO"}
 _CRYPTO = {"BTC-USD", "ETH-USD"}
+
+# S&P 500 SPDR sector ETFs — used by /sectors command
+_SECTOR_ETFS: list[tuple[str, str]] = [
+    ("XLK", "Technology"),
+    ("XLV", "Healthcare"),
+    ("XLF", "Financials"),
+    ("XLE", "Energy"),
+    ("XLI", "Industrials"),
+    ("XLY", "Cons. Discretionary"),
+    ("XLP", "Cons. Staples"),
+    ("XLC", "Communication"),
+    ("XLB", "Materials"),
+    ("XLRE", "Real Estate"),
+    ("XLU", "Utilities"),
+]
 
 
 def _snapshot_group(sym: str) -> str:
@@ -1581,6 +1619,168 @@ async def _fetch_market_snapshot() -> str:
             f"{emoji} {label}: <code>{val_str}</code>  {pct_arrow} {pct_sign}{pct:.2f}%"
         )
 
+    return "\n".join(lines)
+
+
+async def _fetch_sector_data() -> list[dict]:
+    """Fetch daily % change for all 11 S&P 500 sector ETFs.
+
+    Results are cached in Redis for 10 minutes. Each ETF is fetched concurrently;
+    failures are skipped so one bad symbol never blocks the rest.
+
+    Returns:
+        List of dicts sorted by pct_change descending:
+        [{"symbol": "XLK", "name": "Technology", "pct_change": 1.84, "price": 198.3}, ...]
+    """
+    import yfinance as _yf
+
+    from src.database.cache import cache as _redis_cache
+
+    cache_key = "sectors:daily"
+    cached = await _redis_cache.get(cache_key)
+    if cached and isinstance(cached, list):
+        logger.debug("sectors_cache_hit")
+        return cached
+
+    loop = asyncio.get_event_loop()
+
+    def _fetch_sync(sym: str) -> tuple[float, float] | None:
+        try:
+            df = _yf.Ticker(sym).history(period="5d", interval="1d", auto_adjust=True)
+            df = df.dropna(subset=["Close"])
+            if len(df) < 2:
+                return None
+            return float(df["Close"].iloc[-1]), float(df["Close"].iloc[-2])
+        except Exception:  # noqa: BLE001
+            return None
+
+    tasks = [loop.run_in_executor(None, _fetch_sync, sym) for sym, _ in _SECTOR_ETFS]
+    raw = await asyncio.gather(*tasks)
+
+    sectors = []
+    for (sym, name), data in zip(_SECTOR_ETFS, raw, strict=True):
+        if data is None:
+            logger.warning("sector_fetch_failed", symbol=sym)
+            continue
+        curr, prev = data
+        pct = (curr - prev) / prev * 100 if prev else 0.0
+        sectors.append(
+            {
+                "symbol": sym,
+                "name": name,
+                "pct_change": round(pct, 2),
+                "price": round(curr, 2),
+            }
+        )
+
+    sectors.sort(key=lambda x: x["pct_change"], reverse=True)
+    await _redis_cache.set(cache_key, sectors, ttl=600)
+    return sectors
+
+
+async def cmd_sectors(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /sectors — S&P 500 sector rotation ranked by daily performance."""
+    msg_obj = update.message or (
+        update.callback_query.message if update.callback_query else None
+    )
+    if not msg_obj:
+        return
+
+    await msg_obj.reply_text("⏳ Fetching sector data...", parse_mode=ParseMode.HTML)
+
+    try:
+        sectors = await _fetch_sector_data()
+        if not sectors:
+            await msg_obj.reply_text(
+                "❌ No sector data available right now.", parse_mode=ParseMode.HTML
+            )
+            return
+
+        date_str = datetime.now(tz=_ET).strftime("%a %b %d")
+        lines = [
+            f"🏭 <b>Sector Rotation</b> — {date_str}",
+            "━━━━━━━━━━━━━━━━━━━",
+            "",
+        ]
+
+        advancing = 0
+        declining = 0
+        for s in sectors:
+            pct = s["pct_change"]
+            if pct > 1.5:
+                emoji = "🔥"
+            elif pct >= 0:
+                emoji = "🟢"
+                advancing += 1
+            elif pct >= -0.5:
+                emoji = "🟡"
+                declining += 1
+            else:
+                emoji = "🔴"
+                declining += 1
+
+            if pct > 1.5:
+                advancing += 1
+
+            sign = "+" if pct >= 0 else ""
+            name_padded = html.escape(s["name"]).ljust(20)
+            sym_padded = s["symbol"].ljust(4)
+            lines.append(
+                f"{emoji} <code>{name_padded} {sym_padded}  {sign}{pct:.2f}%</code>"
+            )
+
+        lines.append("")
+        lines.append(
+            f"📊 Breadth: <b>{advancing} advancing</b> / <b>{declining} declining</b>"
+        )
+
+        await msg_obj.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+    except Exception as exc:
+        await msg_obj.reply_text(
+            f"❌ Sector data failed: <code>{html.escape(str(exc))}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+
+
+def _format_sector_block(sectors: list[dict]) -> str:
+    """Format sector rotation data as a compact HTML block for reports.
+
+    Args:
+        sectors: List of sector dicts sorted by pct_change (from _fetch_sector_data).
+
+    Returns:
+        HTML string with header, ranked rows, and breadth line.
+    """
+    if not sectors:
+        return ""
+
+    lines = ["", "🏭 <b>Sector Rotation:</b>"]
+    advancing = 0
+    declining = 0
+    for s in sectors:
+        pct = s["pct_change"]
+        if pct > 1.5:
+            emoji = "🔥"
+            advancing += 1
+        elif pct >= 0:
+            emoji = "🟢"
+            advancing += 1
+        elif pct >= -0.5:
+            emoji = "🟡"
+            declining += 1
+        else:
+            emoji = "🔴"
+            declining += 1
+        sign = "+" if pct >= 0 else ""
+        name_padded = html.escape(s["name"]).ljust(20)
+        sym_padded = s["symbol"].ljust(4)
+        lines.append(
+            f"  {emoji} <code>{name_padded} {sym_padded}  {sign}{pct:.2f}%</code>"
+        )
+    lines.append(
+        f"  📊 Breadth: <b>{advancing} advancing</b> / <b>{declining} declining</b>"
+    )
     return "\n".join(lines)
 
 
@@ -1706,6 +1906,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("setalert", cmd_setalert))
     app.add_handler(CommandHandler("myalerts", cmd_myalerts))
     app.add_handler(CommandHandler("cancelalert", cmd_cancelalert))
+    app.add_handler(CommandHandler("sectors", cmd_sectors))
     app.add_handler(CallbackQueryHandler(callback_handler))
     # Fallback handler must be LAST — catches all unrecognized text messages
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cmd_fallback))
