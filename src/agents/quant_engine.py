@@ -87,6 +87,30 @@ class QuantEngine:
 
         return df
 
+    async def fetch_live_price(self, ticker: str) -> tuple[float, float | None]:
+        """Return (live_price, prev_close) using yfinance fast_info.
+
+        Works across all sessions: pre-market, regular, and after-hours.
+
+        Args:
+            ticker: Ticker symbol.
+
+        Returns:
+            Tuple of (last_price, previous_close). prev_close may be None.
+
+        Raises:
+            ValueError: If no live price is available.
+        """
+        loop = asyncio.get_event_loop()
+        fi = await loop.run_in_executor(None, lambda: yf.Ticker(ticker).fast_info)
+        last_price = getattr(fi, "last_price", None)
+        prev_close = getattr(fi, "previous_close", None)
+        if last_price is None:
+            raise ValueError(f"No live price available for {ticker}")
+        return float(last_price), (
+            float(prev_close) if prev_close is not None else None
+        )
+
     async def analyze(self, ticker: str) -> QuantSignal:
         """Run full quantitative analysis for a ticker.
 
@@ -112,6 +136,16 @@ class QuantEngine:
         }
 
         signals = generate_signals(closes, volumes)
+
+        # Override price with live quote (pre-market / regular / after-hours)
+        try:
+            live_price, prev_close = await self.fetch_live_price(ticker)
+            signals["price"] = live_price
+            if prev_close is not None:
+                signals["prev_close"] = prev_close
+            logger.debug("live_price_fetched", ticker=ticker, price=live_price)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("live_price_fallback", ticker=ticker, error=str(exc))
 
         # Fibonacci from 52-week H/L
         fib_levels: FibonacciLevels = calculate_fibonacci(closes, ticker=ticker)

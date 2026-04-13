@@ -75,6 +75,24 @@ def link(text: str, url: str) -> str:
     return f'<a href="{url}">{html.escape(text)}</a>'
 
 
+def _session_label(mkt: dict) -> str:
+    """Return an italicised session tag for display next to prices.
+
+    Returns '' during regular hours, ' <i>(pre-market)</i>' before open,
+    and ' <i>(after-hours)</i>' after close.
+    """
+    if mkt.get("nyse_open"):
+        return ""
+    us_now = now_us()
+    market_open_time = us_now.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_close_time = us_now.replace(hour=16, minute=0, second=0, microsecond=0)
+    if us_now < market_open_time:
+        return " <i>(pre-market)</i>"
+    if us_now >= market_close_time:
+        return " <i>(after-hours)</i>"
+    return ""
+
+
 # ── Command Handlers ────────────────────────────────────────────────────────────
 
 
@@ -244,22 +262,33 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         vol_spike = signals.get("volume_spike", False)
         mas = signals.get("moving_averages", {})
 
-        # Daily % change (prev close → today close)
+        # Daily % change — use live prev_close from signals if available, else history
         day_pct_str = ""
-        if df_for_chart is not None and len(df_for_chart) >= 2:
-            prev_close = float(df_for_chart["Close"].iloc[-2])
-            curr_close = float(df_for_chart["Close"].iloc[-1])
-            day_pct = (curr_close - prev_close) / prev_close * 100
+        prev_close_live = signals.get("prev_close")
+        if prev_close_live is not None and prev_close_live > 0:
+            day_pct = (price - prev_close_live) / prev_close_live * 100
+            pct_sign = "+" if day_pct >= 0 else ""
+            pct_arrow = (
+                "📈" if day_pct > 0.005 else ("📉" if day_pct < -0.005 else "➡️")
+            )
+            day_pct_str = f"  {pct_arrow} {pct_sign}{day_pct:.2f}%"
+        elif df_for_chart is not None and len(df_for_chart) >= 2:
+            prev_close_hist = float(df_for_chart["Close"].iloc[-2])
+            curr_close_hist = float(df_for_chart["Close"].iloc[-1])
+            day_pct = (curr_close_hist - prev_close_hist) / prev_close_hist * 100
             pct_sign = "+" if day_pct >= 0 else ""
             pct_arrow = (
                 "📈" if day_pct > 0.005 else ("📉" if day_pct < -0.005 else "➡️")
             )
             day_pct_str = f"  {pct_arrow} {pct_sign}{day_pct:.2f}%"
 
+        # Session label (pre-market / after-hours / live)
+        session_label = _session_label(mkt)
+
         lines = [
             f"📊 <b>ANALYSIS — <code>{html.escape(ticker)}</code></b>",
             "━━━━━━━━━━━━━━━━━━━",
-            f"💰 <b>Current Price:</b> <code>${price:,.2f}</code>{day_pct_str}",
+            f"💰 <b>Current Price:</b> <code>${price:,.2f}</code>{day_pct_str}{session_label}",
             f"🕐 <b>Updated:</b> {datetime.now(tz=_ET).strftime('%d/%m/%Y %H:%M')} ET",
             "",
         ]
@@ -1567,16 +1596,22 @@ async def _fetch_market_snapshot() -> str:
     loop = asyncio.get_event_loop()
 
     def _fetch_sync(sym: str) -> tuple[float, float] | None:
-        """Synchronous fetch — runs in thread executor."""
+        """Synchronous fetch — returns (live_price, prev_close) via fast_info.
+
+        Falls back to history-based close if fast_info returns None (e.g. some indices).
+        """
         try:
-            ticker_obj = yf.Ticker(sym)
-            df = ticker_obj.history(period="5d", interval="1d", auto_adjust=True)
+            fi = yf.Ticker(sym).fast_info
+            curr = getattr(fi, "last_price", None)
+            prev = getattr(fi, "previous_close", None)
+            if curr is not None and prev is not None:
+                return float(curr), float(prev)
+            # Fallback: last 2 daily closes
+            df = yf.Ticker(sym).history(period="5d", interval="1d", auto_adjust=True)
             df = df.dropna(subset=["Close"])
             if len(df) < 2:
                 return None
-            prev = float(df["Close"].iloc[-2])
-            curr = float(df["Close"].iloc[-1])
-            return curr, prev
+            return float(df["Close"].iloc[-1]), float(df["Close"].iloc[-2])
         except Exception:
             return None
 
@@ -1646,6 +1681,12 @@ async def _fetch_sector_data() -> list[dict]:
 
     def _fetch_sync(sym: str) -> tuple[float, float] | None:
         try:
+            fi = _yf.Ticker(sym).fast_info
+            curr = getattr(fi, "last_price", None)
+            prev = getattr(fi, "previous_close", None)
+            if curr is not None and prev is not None:
+                return float(curr), float(prev)
+            # Fallback: last 2 daily closes
             df = _yf.Ticker(sym).history(period="5d", interval="1d", auto_adjust=True)
             df = df.dropna(subset=["Close"])
             if len(df) < 2:
