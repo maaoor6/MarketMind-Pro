@@ -75,21 +75,26 @@ def link(text: str, url: str) -> str:
     return f'<a href="{url}">{html.escape(text)}</a>'
 
 
-def _session_label(mkt: dict) -> str:
-    """Return an italicised session tag for display next to prices.
+def _session_label(mkt: dict | None = None) -> str:
+    """Return an emoji + italicised session tag for display next to prices.
 
-    Returns '' during regular hours, ' <i>(pre-market)</i>' before open,
-    and ' <i>(after-hours)</i>' after close.
+    Returns '' during regular hours, ' 🌅 <i>(pre-market)</i>' before open,
+    and ' 🌙 <i>(after-hours)</i>' after close.
+
+    Args:
+        mkt: Optional market_status() dict. Fetched automatically if omitted.
     """
+    if mkt is None:
+        mkt = market_status()
     if mkt.get("nyse_open"):
         return ""
     us_now = now_us()
     market_open_time = us_now.replace(hour=9, minute=30, second=0, microsecond=0)
     market_close_time = us_now.replace(hour=16, minute=0, second=0, microsecond=0)
     if us_now < market_open_time:
-        return " <i>(pre-market)</i>"
+        return " 🌅 <i>(pre-market)</i>"
     if us_now >= market_close_time:
-        return " <i>(after-hours)</i>"
+        return " 🌙 <i>(after-hours)</i>"
     return ""
 
 
@@ -1622,7 +1627,7 @@ async def _fetch_market_snapshot() -> str:
     ]
     results = await asyncio.gather(*tasks)
 
-    lines = ["", "🌍 <b>Global Markets Snapshot</b>"]
+    lines = ["", f"🌍 <b>Global Markets Snapshot</b>{_session_label()}"]
     prev_group: str | None = None
     for (sym, label, emoji, has_dollar), data in zip(
         _SNAPSHOT_SYMBOLS, results, strict=True
@@ -1739,7 +1744,7 @@ async def cmd_sectors(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         date_str = datetime.now(tz=_ET).strftime("%a %b %d")
         lines = [
-            f"🏭 <b>Sector Rotation</b> — {date_str}",
+            f"🏭 <b>Sector Rotation</b> — {date_str}{_session_label()}",
             "━━━━━━━━━━━━━━━━━━━",
             "",
         ]
@@ -1796,7 +1801,7 @@ def _format_sector_block(sectors: list[dict]) -> str:
     if not sectors:
         return ""
 
-    lines = ["", "🏭 <b>Sector Rotation:</b>"]
+    lines = ["", f"🏭 <b>Sector Rotation:</b>{_session_label()}"]
     advancing = 0
     declining = 0
     for s in sectors:
