@@ -3,11 +3,17 @@
 import asyncio
 import html
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from datetime import time as dt_time
 
 import pytz
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    BotCommandScopeChat,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -37,6 +43,9 @@ from src.quant.fundamentals import (
     was_reported_today,
 )
 from src.quant.indicators import MomentumScore, momentum_score
+from src.trading.allocator import StrategyAllocator
+from src.trading.stockarena_client import StockArenaClient, StockArenaError
+from src.trading.strategies import default_strategies
 from src.ui.publisher import PAGES_BASE_URL, publish_ticker_chart
 from src.utils.config import settings
 from src.utils.logger import get_logger
@@ -53,6 +62,8 @@ _ET = pytz.timezone("America/New_York")
 # Module-level agent instances
 _quant_engine = QuantEngine()
 _news_agent = NewsSearchAgent()
+_arena_client = StockArenaClient()
+_trading_allocator = StrategyAllocator([s.name for s in default_strategies()])
 
 # Fire-and-forget background task registry (prevents GC before completion)
 _background_tasks: set[asyncio.Task] = set()
@@ -115,6 +126,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         [
             InlineKeyboardButton("🆚 Compare Stocks", callback_data="prompt_compare"),
         ],
+        [
+            InlineKeyboardButton("💼 Portfolio", callback_data="portfolio"),
+            InlineKeyboardButton("🤖 Trading Status", callback_data="trading_status"),
+        ],
+        [
+            InlineKeyboardButton("🛑 STOP Trading", callback_data="trading_off"),
+            InlineKeyboardButton("▶️ Start Trading", callback_data="trading_on"),
+        ],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -136,6 +155,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  • /setalert <code>[TICKER] [PRICE]</code> — Set a price alert\n"
         "  • /myalerts — View your active alerts\n"
         "  • /cancelalert <code>[TICKER]</code> — Cancel an alert\n"
+        "  • /portfolio — Paper-trading portfolio (admin)\n"
+        "  • /trading <code>on|off|status</code> — Trading kill-switch (admin)\n"
         "  • /health — System status\n\n"
         "Choose an action:"
     )
@@ -754,7 +775,7 @@ async def cmd_compare(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /health — English system status dashboard."""
+    """Handle /health — English system status dashboard. Admin-only."""
     from src.database.cache import cache as redis_cache
     from src.database.session import check_db_connection
 
@@ -762,6 +783,12 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         update.callback_query.message if update.callback_query else None
     )
     if not msg_obj:
+        return
+
+    # Restrict /health to admin only
+    user = update.effective_user
+    if not user or str(user.id) != settings.telegram_chat_id:
+        await msg_obj.reply_text("🔒 This command is restricted to the bot admin.")
         return
 
     quant_health, db_health, redis_health = await asyncio.gather(
@@ -798,6 +825,16 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     except Exception as exc:
         news_rss_status = f"❌ {str(exc)[:40]}"
 
+    if settings.stock_arena_token:
+        trading_health = await _arena_client.health_check()
+    else:
+        trading_health = {"status": "error", "detail": "STOCK_ARENA_TOKEN not set"}
+    if not settings.trading_enabled:
+        trading_health = {
+            "status": "ok",
+            "detail": "disabled (TRADING_ENABLED=false)",
+        }
+
     mkt = market_status()
     nyse_time = now_us().strftime("%I:%M %p ET")
     lines = [
@@ -807,11 +844,411 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"{news_rss_status} News RSS:     Google News reachable",
         f"{_s(db_health)} PostgreSQL:   {html.escape(db_health.get('detail', ''))}",
         f"{_s(redis_health)} Redis:        {html.escape(redis_health.get('detail', ''))}",
+        f"{_s(trading_health)} Trading Bot:  {html.escape(trading_health.get('detail', ''))}",
         "━━━━━━━━━━━━━━━━━━━",
         f"🇺🇸 NYSE: {'🟢 Open' if mkt['nyse_open'] else '🔴 Closed'}  ({nyse_time})",
     ]
 
     await msg_obj.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+def _is_admin(update: Update) -> bool:
+    user = update.effective_user
+    return bool(user and str(user.id) == settings.telegram_chat_id)
+
+
+async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /portfolio — live StockArena portfolio + strategy weights. Admin-only."""
+    msg_obj = update.message or (
+        update.callback_query.message if update.callback_query else None
+    )
+    if not msg_obj:
+        return
+    if not _is_admin(update):
+        await msg_obj.reply_text("🔒 This command is restricted to the bot admin.")
+        return
+    if not settings.stock_arena_token:
+        await msg_obj.reply_text("⚠️ STOCK_ARENA_TOKEN is not configured.")
+        return
+
+    try:
+        portfolio = await _arena_client.get_portfolio()
+    except StockArenaError as exc:
+        await msg_obj.reply_text(
+            f"❌ StockArena error: <code>{html.escape(exc.code)}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    ret_emoji = "🟢" if portfolio.return_pct >= 0 else "🔴"
+    lines = [
+        "💼 <b>PAPER TRADING PORTFOLIO</b>",
+        "━━━━━━━━━━━━━━━━━━━",
+        f"💵 Cash: <code>${portfolio.cash:,.2f}</code>",
+        f"📊 Total value: <code>${portfolio.total_value:,.2f}</code>",
+        f"{ret_emoji} Return: <code>{portfolio.return_pct:+.2f}%</code>",
+    ]
+    if portfolio.positions:
+        lines += ["", "📦 <b>Open Positions:</b>"]
+        for pos in portfolio.positions.values():
+            line = f"  • <b>{pos.ticker}</b>: {pos.quantity} @ ${pos.avg_price:,.2f}"
+            if pos.current_price:
+                chg = (pos.current_price - pos.avg_price) / pos.avg_price * 100
+                line += f" → ${pos.current_price:,.2f} ({chg:+.1f}%)"
+            lines.append(line)
+    else:
+        lines += ["", "📦 No open positions"]
+
+    try:
+        weights = await _trading_allocator.get_weights()
+        lines += ["", "🧠 <b>Strategy Weights:</b>"]
+        for name, weight in sorted(weights.items(), key=lambda x: -x[1]):
+            lines.append(f"  • {name}: {weight:.0%}")
+    except Exception:  # noqa: BLE001
+        logger.debug("portfolio_weights_failed")
+
+    try:
+        from src.database.cache import cache as redis_cache
+
+        universe = await redis_cache.get("trading:universe")
+        if not isinstance(universe, list) or not universe:
+            universe = settings.trading_watchlist
+        decision_lines = []
+        for ticker in universe[:5]:
+            decision = await redis_cache.get(f"trading:last_decision:{ticker}")
+            if decision and decision.get("signals"):
+                top = decision["signals"][0]
+                decision_lines.append(
+                    f"  • {ticker}: {top.get('action', 'HOLD')}"
+                    f" — {html.escape(str(top.get('reason', ''))[:60])}"
+                )
+        if decision_lines:
+            lines += ["", "🕐 <b>Last Decisions:</b>", *decision_lines]
+    except Exception:  # noqa: BLE001
+        logger.debug("portfolio_decisions_failed")
+
+    # Macro gate + per-agent breakdown + execution drift (Orchestrator state).
+    try:
+        from src.trading.execution_tracker import ExecutionTracker
+        from src.trading.orchestrator import Orchestrator
+
+        state = await Orchestrator.load_state()
+        if state:
+            macro = state.get("macro", {})
+            lines += [
+                "",
+                "🌐 <b>Macro Gate:</b>",
+                f"  • {macro.get('regime', '—')} / {macro.get('decision', '—')} "
+                f"(size ×{macro.get('size_mult', '—')})",
+            ]
+            frozen = set(state.get("frozen_agents", []))
+            agent_rows = state.get("agents", [])
+            if agent_rows:
+                lines += ["", "🤖 <b>Agents:</b>"]
+                for a in agent_rows:
+                    if a["name"] in frozen:
+                        status = "⏸️ frozen"
+                    elif a.get("active"):
+                        status = "🟢 active"
+                    else:
+                        status = "⚪ idle"
+                    lines.append(
+                        f"  • {html.escape(a['display'])}: {status} "
+                        f"({len(a['strategies'])} strat, cap {a['capital_cap']:.0%})"
+                    )
+        drift = await ExecutionTracker.summary()
+        if drift:
+            lines += [
+                "",
+                f"📉 <b>Exec drift:</b> {drift.avg_adverse_pct:+.2f}% avg "
+                f"over {drift.count} fills (worst {drift.worst_adverse_pct:+.2f}%)",
+            ]
+    except Exception:  # noqa: BLE001
+        logger.debug("portfolio_orchestrator_state_failed")
+
+    await msg_obj.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+async def cmd_trading(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /trading on|off|status — live trading kill-switch. Admin-only."""
+    from src.database.cache import cache as redis_cache
+
+    msg_obj = update.message or (
+        update.callback_query.message if update.callback_query else None
+    )
+    if not msg_obj:
+        return
+    if not _is_admin(update):
+        await msg_obj.reply_text("🔒 This command is restricted to the bot admin.")
+        return
+
+    arg = (context.args[0].lower() if context.args else "status").strip()
+    if arg == "on":
+        await redis_cache.set("trading:enabled", "on")
+        if not settings.trading_enabled:
+            await msg_obj.reply_text(
+                "⚠️ Redis flag set to ON, but <code>TRADING_ENABLED=false</code> in "
+                ".env — the agent stays idle until you set it to true and restart.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        await msg_obj.reply_text(
+            "🟢 Trading <b>ENABLED</b>.", parse_mode=ParseMode.HTML
+        )
+        return
+    if arg == "off":
+        await redis_cache.set("trading:enabled", "off")
+        await msg_obj.reply_text(
+            "🔴 Trading <b>DISABLED</b> — kill-switch active. "
+            "The agent stops within one cycle.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    flag = await redis_cache.get("trading:enabled")
+    redis_state = "off (kill-switch)" if flag == "off" else "on"
+    arena_health = await _arena_client.health_check()
+    lines = [
+        "⚙️ <b>TRADING STATUS</b>",
+        "━━━━━━━━━━━━━━━━━━━",
+        f"• TRADING_ENABLED (env): <code>{settings.trading_enabled}</code>",
+        f"• Kill-switch (Redis): <code>{redis_state}</code>",
+        f"• Extended hours: <code>{settings.trading_extended_hours}</code>",
+        f"• StockArena API: {html.escape(arena_health.get('detail', ''))}",
+        "",
+        "Usage: <code>/trading on</code> · <code>/trading off</code>",
+    ]
+    await msg_obj.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+async def cmd_macro(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/force_macro_off on|off|status — manual macro buy-halt. Admin-only."""
+    from src.database.cache import cache as redis_cache
+
+    msg_obj = update.message or (
+        update.callback_query.message if update.callback_query else None
+    )
+    if not msg_obj:
+        return
+    if not _is_admin(update):
+        await msg_obj.reply_text("🔒 This command is restricted to the bot admin.")
+        return
+
+    arg = (context.args[0].lower() if context.args else "status").strip()
+    if arg == "on":
+        await redis_cache.set("trading:macro:force_off", "on")
+        await msg_obj.reply_text(
+            "🛑 <b>Macro force-OFF engaged</b> — no new buys until you clear it "
+            "with <code>/force_macro_off off</code>. Exits still run.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    if arg == "off":
+        await redis_cache.delete("trading:macro:force_off")
+        await msg_obj.reply_text(
+            "✅ Macro force-OFF cleared — the gate resumes automatic control.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    forced = await redis_cache.get("trading:macro:force_off")
+    state = await redis_cache.get("trading:macro:state") or {}
+    lines = [
+        "🌐 <b>MACRO GATE</b>",
+        "━━━━━━━━━━━━━━━━━━━",
+        f"• Manual force-off: <code>{'ON' if forced == 'on' else 'off'}</code>",
+        f"• Regime: <code>{state.get('regime', '—')}</code>",
+        f"• Decision: <code>{state.get('decision', '—')}</code>",
+        f"• Size mult: <code>{state.get('size_mult', '—')}</code>",
+        f"• {html.escape(str(state.get('rationale', '—')))}",
+        "",
+        "Usage: <code>/force_macro_off on|off</code>",
+    ]
+    await msg_obj.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+async def cmd_pause_agent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/pause_agent <name> · /resume_agent <name> — freeze/unfreeze one agent."""
+    from src.database.cache import cache as redis_cache
+    from src.trading.agents import build_agents
+
+    msg_obj = update.message or (
+        update.callback_query.message if update.callback_query else None
+    )
+    if not msg_obj:
+        return
+    if not _is_admin(update):
+        await msg_obj.reply_text("🔒 This command is restricted to the bot admin.")
+        return
+
+    resume = (update.message.text or "").lstrip("/").startswith("resume")
+    names = {a.name for a in build_agents()}
+    arg = (context.args[0].lower() if context.args else "").strip()
+    if arg not in names:
+        await msg_obj.reply_text(
+            "Usage: <code>/pause_agent &lt;name&gt;</code>\n"
+            f"Agents: {', '.join(sorted(names)) or '—'}",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    key = f"trading:agent:{arg}:halted_until"
+    if resume:
+        await redis_cache.delete(key)
+        await msg_obj.reply_text(
+            f"✅ Agent <b>{arg}</b> resumed.", parse_mode=ParseMode.HTML
+        )
+    else:
+        until = (datetime.now(UTC) + timedelta(days=3650)).isoformat()
+        await redis_cache.set(key, until)
+        await msg_obj.reply_text(
+            f"⏸️ Agent <b>{arg}</b> paused until manually resumed "
+            f"(<code>/resume_agent {arg}</code>).",
+            parse_mode=ParseMode.HTML,
+        )
+
+
+async def cmd_sync_positions(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """/sync_positions — force a StockArena reconciliation next cycle. Admin-only."""
+    from src.database.cache import cache as redis_cache
+
+    msg_obj = update.message or (
+        update.callback_query.message if update.callback_query else None
+    )
+    if not msg_obj:
+        return
+    if not _is_admin(update):
+        await msg_obj.reply_text("🔒 This command is restricted to the bot admin.")
+        return
+    await redis_cache.set("trading:force_reconcile", "on")
+    await msg_obj.reply_text(
+        "🔄 Reconciliation queued — the orchestrator will re-sync positions "
+        "against StockArena on its next cycle.",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+# ── Backtest trigger (admin-only; the full report opens in the browser) ──
+_backtest_task: asyncio.Task | None = None
+_DEFAULT_ROTATION_SIZE = 8
+
+
+async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /backtest [TICKERS...] — run the offline strategy backtest.
+
+    The run is local-only (yfinance data, simulated broker — no StockArena),
+    executes in a background thread, and replies with the winner + the path
+    of the Hebrew HTML report. Only one run at a time.
+    """
+    global _backtest_task
+    msg_obj = update.message or (
+        update.callback_query.message if update.callback_query else None
+    )
+    if not msg_obj:
+        return
+    if not _is_admin(update):
+        await msg_obj.reply_text("🔒 This command is restricted to the bot admin.")
+        return
+    if _backtest_task is not None and not _backtest_task.done():
+        await msg_obj.reply_text("⏳ בדיקה כבר רצה — נחכה שתסתיים לפני שמתחילים חדשה.")
+        return
+
+    tickers = [
+        t.upper().strip() for t in (context.args or []) if _TICKER_RE.match(t.upper())
+    ]
+    rotate = None if tickers else _DEFAULT_ROTATION_SIZE
+    scope = (
+        ", ".join(tickers)
+        if tickers
+        else f"רוטציה אוטומטית ({_DEFAULT_ROTATION_SIZE} מניות שנבדקו הכי מעט)"
+    )
+    await msg_obj.reply_text(
+        f"⏳ <b>בדיקת שיטות המסחר יצאה לדרך</b>\n"
+        f"📋 מניות: {html.escape(scope)}\n"
+        "🖥️ רץ מקומית על נתוני עבר, בכסף וירטואלי בלבד. "
+        "אעדכן כאן כשהדוח מוכן (זה יכול לקחת כמה דקות).",
+        parse_mode=ParseMode.HTML,
+    )
+
+    async def _run() -> None:
+        from src.backtest.runner import run_backtest_async
+
+        chat_id = msg_obj.chat_id
+        try:
+            summary = await run_backtest_async(
+                mode="all", tickers=tickers or None, rotate=rotate
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("backtest_telegram_failed", error=str(exc))
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ הבדיקה נכשלה: <code>{html.escape(str(exc)[:200])}</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        winner = summary.winner or "—"
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "📥 אמץ משקולות לסוכן החי", callback_data="bt:adopt"
+                    )
+                ]
+            ]
+        )
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "✅ <b>הבדיקה הסתיימה</b>\n"
+                f"📅 תקופה: {summary.start} → {summary.end}\n"
+                f"🏆 השיטה המנצחת בריצה: <b>{html.escape(winner)}</b>\n\n"
+                "🌐 הדוח המלא בעברית (לפתיחה בדפדפן):\n"
+                f"<code>{html.escape(str(summary.report_path))}</code>\n"
+                f"🗂️ ריכוז כל הריצות: <code>{html.escape(str(summary.index_path))}</code>"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+        )
+
+    _backtest_task = asyncio.create_task(_run())
+
+
+async def _handle_backtest_adopt(update: Update) -> None:
+    """bt:adopt button — export cumulative seeds for the live allocator."""
+    msg_obj = update.callback_query.message if update.callback_query else None
+    if not msg_obj or not _is_admin(update):
+        return
+    from pathlib import Path
+
+    from src.backtest.history import aggregate, load_runs
+    from src.backtest.report import export_weight_seeds
+
+    agg = aggregate(load_runs())
+    if not agg["avg_returns"]:
+        await msg_obj.reply_text(
+            "⚠️ אין עדיין תוצאות מצטברות לאימוץ — הרץ /backtest קודם."
+        )
+        return
+    path = export_weight_seeds(
+        agg["avg_returns"],
+        agg["regime_avg_returns"],
+        period=f"cumulative ({agg['runs']} runs)",
+        source="telegram_adopt",
+        path=Path(settings.backtest_weights_path),
+    )
+    ranking = "\n".join(
+        f"  • {name}: {avg:+.2f}%"
+        for name, avg in sorted(agg["avg_returns"].items(), key=lambda kv: -kv[1])
+    )
+    await msg_obj.reply_text(
+        "📥 <b>המשקולות אומצו לסוכן החי</b>\n"
+        f"נשמר ל-<code>{html.escape(str(path))}</code> "
+        f"(מבוסס על {agg['runs']} ריצות):\n{ranking}\n\n"
+        "הסוכן ישתמש בהן כנקודת פתיחה; ביצועים חיים גוברים עליהן בהמשך.",
+        parse_mode=ParseMode.HTML,
+    )
 
 
 _TICKER_RE = re.compile(r"^[A-Z.\-]{1,10}$")
@@ -1076,8 +1513,61 @@ async def cmd_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # ── Callback Query Handler ──────────────────────────────────────────────────────
 
 
+async def _cmd_unauthorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reply to unauthorized users with their ID, and notify the admin."""
+    user = update.effective_user
+    uid = user.id if user else "unknown"
+    username = f"@{user.username}" if user and user.username else "no username"
+    full_name = user.full_name if user else "unknown"
+    msg = update.effective_message
+    attempted_text = (msg.text or "(no text)") if msg else "(unknown)"
+
+    if msg:
+        await msg.reply_text(
+            f"🔒 <b>Access Denied</b>\n\n"
+            f"This bot is private.\n"
+            f"Your Telegram ID: <code>{uid}</code>\n\n"
+            f"Send this ID to the bot owner to request access.",
+            parse_mode=ParseMode.HTML,
+        )
+
+    if settings.telegram_chat_id:
+        await context.bot.send_message(
+            chat_id=settings.telegram_chat_id,
+            text=(
+                f"⚠️ <b>Unauthorized Access Attempt</b>\n\n"
+                f"👤 Name: {html.escape(str(full_name))}\n"
+                f"🆔 User ID: <code>{uid}</code>\n"
+                f"📛 Username: {html.escape(username)}\n"
+                f"💬 Message: <code>{html.escape(attempted_text[:100])}</code>\n"
+                f"🕐 Time: {datetime.now(tz=_ET).strftime('%d/%m/%Y %H:%M')} ET"
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+
+
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle inline keyboard button presses."""
+    # Auth check — inline buttons are not covered by filters.User on CommandHandler
+    _allowed = settings.allowed_user_ids
+    if _allowed and update.effective_user and update.effective_user.id not in _allowed:
+        await update.callback_query.answer("🔒 Access denied.", show_alert=True)
+        user = update.effective_user
+        if settings.telegram_chat_id:
+            await context.bot.send_message(
+                chat_id=settings.telegram_chat_id,
+                text=(
+                    f"⚠️ <b>Unauthorized Inline Button Press</b>\n\n"
+                    f"👤 Name: {html.escape(str(user.full_name))}\n"
+                    f"🆔 User ID: <code>{user.id}</code>\n"
+                    f"📛 Username: {html.escape(f'@{user.username}' if user.username else 'no username')}\n"
+                    f"💬 Button: <code>{html.escape(str(update.callback_query.data)[:100])}</code>\n"
+                    f"🕐 Time: {datetime.now(tz=_ET).strftime('%d/%m/%Y %H:%M')} ET"
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+        return
+
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -1088,6 +1578,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if data == "health":
         await cmd_health(update, context)
+
+    elif data == "bt:adopt":
+        await _handle_backtest_adopt(update)
 
     elif data.startswith("analyze:"):
         context.args = [data.split(":", 1)[1]]
@@ -1127,6 +1620,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     elif data == "market_open":
         await send_market_open_report(context.application)
+
+    elif data == "portfolio":
+        await cmd_portfolio(update, context)
+
+    elif data == "trading_status":
+        context.args = []
+        await cmd_trading(update, context)
+
+    elif data == "trading_off":
+        context.args = ["off"]
+        await cmd_trading(update, context)
+
+    elif data == "trading_on":
+        context.args = ["on"]
+        await cmd_trading(update, context)
 
 
 # ── Scheduled Job Functions ─────────────────────────────────────────────────────
@@ -1263,6 +1771,164 @@ async def _job_market_preview(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def _job_market_close_regular(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Scheduled job: post-close summary (4:15 PM ET, Mon–Fri)."""
     await send_market_close_report(context.application)
+
+
+async def _weekly_spy_comparison(portfolio_return_pct: float) -> str | None:
+    """One-line benchmark context: SPY's move over the last trading week."""
+
+    def _spy_week() -> float | None:
+        import yfinance as _yf
+
+        df = _yf.Ticker("SPY").history(period="7d", interval="1d", auto_adjust=True)
+        if df is None or df.empty or len(df) < 2:
+            return None
+        closes = df["Close"]
+        return float((closes.iloc[-1] / closes.iloc[0] - 1) * 100)
+
+    try:
+        spy_pct = await asyncio.to_thread(_spy_week)
+    except Exception:  # noqa: BLE001 — benchmark line is best-effort
+        return None
+    if spy_pct is None:
+        return None
+    return (
+        f"📈 SPY this week: {spy_pct:+.2f}% · "
+        f"portfolio since start: {portfolio_return_pct:+.2f}%"
+    )
+
+
+async def _job_weekly_strategy_report(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Scheduled job: weekly per-strategy performance report (Sunday 18:00 IL)."""
+    if not settings.trading_enabled:
+        return
+    try:
+        perf = await _trading_allocator.get_performance()
+        weights = await _trading_allocator.get_weights()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("weekly_strategy_report_failed", error=str(exc))
+        return
+
+    lines = [
+        "🧠 <b>WEEKLY STRATEGY REPORT</b>",
+        "━━━━━━━━━━━━━━━━━━━",
+    ]
+    disabled: list[str] = []
+    for name, weight in sorted(weights.items(), key=lambda x: -x[1]):
+        stats = perf.get(name)
+        if weight == 0:
+            disabled.append(name)
+            continue
+        if stats:
+            lines.append(
+                f"• <b>{name}</b> — weight {weight:.0%}, "
+                f"avg return {stats['avg_return_pct']:+.2f}%, "
+                f"win rate {stats['win_rate']:.0%} "
+                f"({stats['signals_scored']} signals)"
+            )
+        else:
+            lines.append(
+                f"• <b>{name}</b> — weight {weight:.0%}, no scored signals yet"
+            )
+    if disabled:
+        lines += [
+            "",
+            "🚫 <b>Disabled (negative avg — auto re-enable on recovery):</b>",
+            "• " + ", ".join(disabled),
+        ]
+
+    try:
+        portfolio = await _arena_client.get_portfolio()
+        lines += [
+            "",
+            f"💼 Portfolio: ${portfolio.total_value:,.2f} "
+            f"({portfolio.return_pct:+.2f}%)",
+        ]
+        spy_line = await _weekly_spy_comparison(portfolio.return_pct)
+        if spy_line:
+            lines.append(spy_line)
+    except StockArenaError:
+        pass
+
+    # Macro gate + agents + execution drift (Orchestrator state).
+    try:
+        from src.trading.execution_tracker import ExecutionTracker
+        from src.trading.orchestrator import Orchestrator
+
+        state = await Orchestrator.load_state()
+        if state:
+            macro = state.get("macro", {})
+            frozen = set(state.get("frozen_agents", []))
+            lines += [
+                "",
+                f"🌐 Macro: {macro.get('regime', '—')} / {macro.get('decision', '—')}",
+            ]
+            active = [
+                a["display"]
+                for a in state.get("agents", [])
+                if a.get("active") and a["name"] not in frozen
+            ]
+            if active:
+                lines.append("🤖 Active agents: " + ", ".join(active))
+            if frozen:
+                lines.append("⏸️ Frozen: " + ", ".join(sorted(frozen)))
+        drift = await ExecutionTracker.summary()
+        if drift:
+            lines.append(
+                f"📉 Exec drift: {drift.avg_adverse_pct:+.2f}% avg ({drift.count} fills)"
+            )
+    except Exception:  # noqa: BLE001
+        logger.debug("weekly_orchestrator_state_failed")
+
+    await context.application.bot.send_message(
+        chat_id=settings.telegram_chat_id,
+        text="\n".join(lines),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def _format_trading_day_section() -> str | None:
+    """Today's executed paper trades + portfolio for the close report."""
+    if not settings.trading_enabled:
+        return None
+    from sqlalchemy import select as _select
+
+    from src.database.models import TradeRecord
+
+    midnight_et = now_us().replace(hour=0, minute=0, second=0, microsecond=0)
+    try:
+        async with AsyncSessionLocal() as session:
+            stmt = (
+                _select(TradeRecord)
+                .where(TradeRecord.executed_at >= midnight_et)
+                .order_by(TradeRecord.executed_at)
+            )
+            trades = (await session.execute(stmt)).scalars().all()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("trading_day_section_failed", error=str(exc))
+        return None
+
+    lines = ["", "🤖 <b>Autonomous Trading Today:</b>"]
+    if trades:
+        for t in trades:
+            emoji = "🟢" if t.action == "BUY" else "🔴"
+            fill = f" @ ${float(t.fill_price):,.2f}" if t.fill_price else ""
+            lines.append(
+                f"  {emoji} {t.action} {t.quantity} <b>{t.ticker}</b>{fill}"
+                f" ({t.strategy})"
+            )
+    else:
+        lines.append("  • No trades executed today")
+
+    try:
+        portfolio = await _arena_client.get_portfolio()
+        ret_emoji = "🟢" if portfolio.return_pct >= 0 else "🔴"
+        lines.append(
+            f"  💼 ${portfolio.total_value:,.2f} "
+            f"{ret_emoji} {portfolio.return_pct:+.2f}% (cash ${portfolio.cash:,.2f})"
+        )
+    except StockArenaError:
+        pass
+    return "\n".join(lines)
 
 
 # ── Automated Reports ───────────────────────────────────────────────────────────
@@ -1521,6 +2187,10 @@ async def send_market_close_report(app: Application) -> None:
     sector_block = _format_sector_block(sectors)
     if sector_block:
         lines.append(sector_block)
+
+    trading_section = await _format_trading_day_section()
+    if trading_section:
+        lines.append(trading_section)
 
     await app.bot.send_message(
         chat_id=settings.telegram_chat_id,
@@ -1942,20 +2612,48 @@ def build_application() -> Application:
 
     app = Application.builder().token(settings.telegram_token).build()
 
-    # ── Command handlers ──────────────────────────────────────────────
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("analyze", cmd_analyze))
-    app.add_handler(CommandHandler("news", cmd_news))
-    app.add_handler(CommandHandler("fibonacci", cmd_fibonacci))
-    app.add_handler(CommandHandler("compare", cmd_compare))
-    app.add_handler(CommandHandler("health", cmd_health))
-    app.add_handler(CommandHandler("setalert", cmd_setalert))
-    app.add_handler(CommandHandler("myalerts", cmd_myalerts))
-    app.add_handler(CommandHandler("cancelalert", cmd_cancelalert))
-    app.add_handler(CommandHandler("sectors", cmd_sectors))
-    app.add_handler(CallbackQueryHandler(callback_handler))
-    # Fallback handler must be LAST — catches all unrecognized text messages
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cmd_fallback))
+    # ── Auth filter ───────────────────────────────────────────────────
+    # filters.ALL when list is empty → open mode (useful for first-run to get your user ID)
+    _allowed_ids = settings.allowed_user_ids
+    _auth_filter = filters.User(user_id=_allowed_ids) if _allowed_ids else filters.ALL
+
+    # ── Command handlers (all gated by _auth_filter) ──────────────────
+    app.add_handler(CommandHandler("start", cmd_start, filters=_auth_filter))
+    app.add_handler(CommandHandler("analyze", cmd_analyze, filters=_auth_filter))
+    app.add_handler(CommandHandler("news", cmd_news, filters=_auth_filter))
+    app.add_handler(CommandHandler("fibonacci", cmd_fibonacci, filters=_auth_filter))
+    app.add_handler(CommandHandler("compare", cmd_compare, filters=_auth_filter))
+    app.add_handler(CommandHandler("health", cmd_health, filters=_auth_filter))
+    app.add_handler(CommandHandler("setalert", cmd_setalert, filters=_auth_filter))
+    app.add_handler(CommandHandler("myalerts", cmd_myalerts, filters=_auth_filter))
+    app.add_handler(
+        CommandHandler("cancelalert", cmd_cancelalert, filters=_auth_filter)
+    )
+    app.add_handler(CommandHandler("sectors", cmd_sectors, filters=_auth_filter))
+    app.add_handler(CommandHandler("portfolio", cmd_portfolio, filters=_auth_filter))
+    app.add_handler(CommandHandler("trading", cmd_trading, filters=_auth_filter))
+    app.add_handler(CommandHandler("force_macro_off", cmd_macro, filters=_auth_filter))
+    app.add_handler(
+        CommandHandler("pause_agent", cmd_pause_agent, filters=_auth_filter)
+    )
+    app.add_handler(
+        CommandHandler("resume_agent", cmd_pause_agent, filters=_auth_filter)
+    )
+    app.add_handler(
+        CommandHandler("sync_positions", cmd_sync_positions, filters=_auth_filter)
+    )
+    app.add_handler(CommandHandler("backtest", cmd_backtest, filters=_auth_filter))
+    app.add_handler(
+        CallbackQueryHandler(callback_handler)
+    )  # auth checked inside handler
+    # Authorized text messages (fallback for unrecognized commands)
+    app.add_handler(
+        MessageHandler(_auth_filter & filters.TEXT & ~filters.COMMAND, cmd_fallback)
+    )
+    # Unauthorized catch-all — MUST be LAST
+    if _allowed_ids:
+        app.add_handler(MessageHandler(~_auth_filter, _cmd_unauthorized))
+        app.add_handler(CommandHandler("start", _cmd_unauthorized))
 
     # ── Scheduled jobs via JobQueue (APScheduler under the hood) ─────
     tz_us = pytz.timezone("America/New_York")
@@ -1982,6 +2680,14 @@ def build_application() -> Application:
             first=10,
             name="price_alerts",
         )
+        # Sunday 18:00 IL — weekly strategy performance report
+        tz_il = pytz.timezone("Asia/Jerusalem")
+        jq.run_daily(
+            _job_weekly_strategy_report,
+            time=dt_time(18, 0, tzinfo=tz_il),
+            days=(6,),
+            name="weekly_strategy_report",
+        )
 
     return app
 
@@ -2000,9 +2706,40 @@ class TelegramDispatcher:
         self.app = build_application()
         logger.info("telegram_dispatcher_starting")
         await self.app.initialize()
+        await self._register_command_menu()
         await self.app.start()
         await self.app.updater.start_polling(drop_pending_updates=True)
         logger.info("telegram_dispatcher_running")
+
+    async def _register_command_menu(self) -> None:
+        """Publish the '/' command menu; admin chat also sees admin commands."""
+        public_commands = [
+            BotCommand("start", "Welcome + main menu"),
+            BotCommand("analyze", "Full report for a ticker"),
+            BotCommand("news", "Live headlines / market snapshot"),
+            BotCommand("fibonacci", "52-week Fibonacci levels"),
+            BotCommand("compare", "Compare two tickers"),
+            BotCommand("sectors", "S&P 500 sector rotation"),
+            BotCommand("setalert", "Set a price alert"),
+            BotCommand("myalerts", "View active alerts"),
+            BotCommand("cancelalert", "Cancel an alert"),
+        ]
+        admin_commands = public_commands + [
+            BotCommand("portfolio", "Paper-trading portfolio"),
+            BotCommand("trading", "Trading kill-switch: on|off|status"),
+            BotCommand("backtest", "Run offline strategy backtest"),
+            BotCommand("health", "System status dashboard"),
+        ]
+        try:
+            await self.app.bot.set_my_commands(public_commands)
+            if settings.telegram_chat_id:
+                await self.app.bot.set_my_commands(
+                    admin_commands,
+                    scope=BotCommandScopeChat(chat_id=settings.telegram_chat_id),
+                )
+            logger.info("telegram_command_menu_registered")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("telegram_command_menu_failed", error=str(exc))
 
     async def stop(self) -> None:
         """Gracefully stop the bot."""

@@ -121,6 +121,75 @@ class InsiderTransaction(Base):
     )
 
 
+class TradeRecord(Base):
+    """Executed paper trades placed by the autonomous trading agent."""
+
+    __tablename__ = "trade_records"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    ticker: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(4), nullable=False)  # BUY, SELL
+    quantity: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    fill_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    notional: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    strategy: Mapped[str] = mapped_column(String(40), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    portfolio_value_after: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 6), nullable=True
+    )
+    cash_after: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    executed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    def __repr__(self) -> str:
+        return f"<TradeRecord {self.action} {self.quantity} {self.ticker}>"
+
+
+class StrategySignalRecord(Base):
+    """Every non-HOLD strategy signal, scored later for virtual performance."""
+
+    __tablename__ = "strategy_signals"
+    __table_args__ = (Index("ix_strategy_signals_scored", "strategy", "scored"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    strategy: Mapped[str] = mapped_column(String(40), nullable=False)
+    ticker: Mapped[str] = mapped_column(String(20), nullable=False)
+    action: Mapped[str] = mapped_column(String(4), nullable=False)  # BUY, SELL
+    confidence: Mapped[Decimal] = mapped_column(Numeric(4, 3), nullable=False)
+    decision_price: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    eval_after: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    scored: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    virtual_return_pct: Mapped[Decimal | None] = mapped_column(
+        Numeric(8, 4), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class StrategyPerformance(Base):
+    """Aggregate virtual performance per strategy (drives capital weights)."""
+
+    __tablename__ = "strategy_performance"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    strategy: Mapped[str] = mapped_column(String(40), nullable=False, unique=True)
+    signals_scored: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    avg_return_pct: Mapped[Decimal] = mapped_column(
+        Numeric(8, 4), default=0, nullable=False
+    )
+    win_rate: Mapped[Decimal] = mapped_column(Numeric(5, 4), default=0, nullable=False)
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), onupdate=func.now(), server_default=func.now()
+    )
+
+
 class SentimentRecord(Base):
     """News sentiment analysis results."""
 
