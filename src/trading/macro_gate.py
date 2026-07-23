@@ -32,13 +32,19 @@ _STREAK_KEY = "trading:macro:stable_streak"
 _STATE_TTL = 3600
 
 # Composite risk-score thresholds (higher = more risk-on).
-# OFF requires genuinely stacked risk (e.g. SPY<SMA200 −0.45 AND VIX>30 −0.35
-# ⇒ −0.80), not a single condition. The 64-year backtest showed a hard OFF on
-# SPY<SMA200 alone whipsaws and misses rebounds (gated 6.1% vs ungated 6.8%
-# CAGR); dampening to half-size (SCALED) instead of halting is the fix — a lone
-# risk signal now SCALEs, and only a true risk-off tape trips OFF.
+# The gate scales buy volume *continuously* with how weak the tape is, instead
+# of a binary halt. The 64-year backtest showed a hard OFF on SPY<SMA200 alone
+# whipsaws and misses rebounds (gated 6.1% vs ungated 6.8% CAGR); a graded
+# SCALED band that ramps buy budget from full size down toward a floor — and
+# only trips OFF on genuinely stacked risk — is the fix.
+#   score ≥ _SCALED_THRESHOLD .............. ON, full size
+#   _OFF_THRESHOLD < score < _SCALED ....... SCALED, size ramps _SCALED_FLOOR→1
+#   score ≤ _OFF_THRESHOLD ................. OFF (e.g. SPY<SMA200 −0.45 AND
+#                                            VIX>30 −0.35 ⇒ −0.80)
 _OFF_THRESHOLD = -0.70
 _SCALED_THRESHOLD = 0.10
+_SCALED_FLOOR = 0.25  # smallest non-zero buy multiplier at the weak end of SCALED
+_VOLATILE_SIZE_CAP = 0.5  # never full-size in a high-vol tape
 # Extreme fear overlays that can only tighten risk.
 _SENTIMENT_FLOOR = -0.35  # avg headline sentiment below this ⇒ scale down
 _PUT_CALL_FEAR = 1.15  # total put/call above this ⇒ scale down
@@ -124,25 +130,26 @@ def score_macro(data: MacroData) -> tuple[str, float, list[str]]:
 
 
 def _decision_from_score(risk_score: float, regime: str) -> tuple[str, float]:
-    """Map the composite score + regime to (decision, size_mult)."""
+    """Map the composite score + regime to (decision, size_mult).
+
+    Graded/dynamic: within the SCALED band the buy multiplier ramps linearly
+    from ``_SCALED_FLOOR`` (weakest tape) to 1.0 (near-constructive), so buy
+    volume shrinks smoothly as the market deteriorates rather than snapping to
+    a hard stop. OFF is reserved for genuinely stacked risk.
+    """
     if risk_score <= _OFF_THRESHOLD:
         return "OFF", 0.0
-    if risk_score <= _SCALED_THRESHOLD:
-        return "SCALED", 0.5
-    decision, size = "ON", 1.0
-    if regime == "VOLATILE":  # never full-size in a high-vol tape
-        decision, size = "SCALED", 0.5
-    return decision, size
-
-
-def _confidence_factor(regime: str, data: MacroData) -> float:
-    """Legacy buy-confidence dampener (parity with old _regime_state)."""
-    factor = 1.0
-    if data.spy_above_sma200 is False:
-        factor *= 0.5
-    if data.vix is not None and data.vix > 30:
-        factor *= 0.5
-    return factor
+    if risk_score >= _SCALED_THRESHOLD:
+        # Constructive tape — full size, except never full in a volatile regime.
+        if regime == "VOLATILE":
+            return "SCALED", _VOLATILE_SIZE_CAP
+        return "ON", 1.0
+    # SCALED band: interpolate the size multiplier across the score range.
+    frac = (risk_score - _OFF_THRESHOLD) / (_SCALED_THRESHOLD - _OFF_THRESHOLD)
+    size = _SCALED_FLOOR + frac * (1.0 - _SCALED_FLOOR)
+    if regime == "VOLATILE":
+        size = min(size, _VOLATILE_SIZE_CAP)
+    return "SCALED", round(size, 3)
 
 
 class MacroTimingGate:
@@ -157,7 +164,11 @@ class MacroTimingGate:
         data = await self._provider.fetch()
         regime, risk_score, reasons = score_macro(data)
         decision, size_mult = _decision_from_score(risk_score, regime)
-        conf_factor = _confidence_factor(regime, data)
+        # The gate expresses all risk through the graded size_mult, so buy
+        # confidence is left undampened here (no double-penalty). The legacy
+        # 0.5-step confidence dampener still applies on the gate-disabled path
+        # (Orchestrator._legacy_state).
+        conf_factor = 1.0
 
         # ── Event blackout (can only tighten) ──
         blackout = False

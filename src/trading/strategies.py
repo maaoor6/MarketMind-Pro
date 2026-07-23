@@ -1068,11 +1068,11 @@ def default_strategies() -> list[Strategy]:
     (11.5% CAGR) and DipBuyer (11.3%, Sharpe 0.81) led; MomentumDaily and
     MeanReversion were demoted to the experimental set (CAGR ≤ 4.5%).
 
-    Promoted 2026-07-23 from the full-pool 64-year run (431 tickers):
-    SectorRotation and CrossAsset — regime hedges that top the avg-per-signal
-    metric (+1.08%, +0.99%) and are strongest in BEAR/VOLATILE (+2.17/+2.16 and
-    +1.13/+1.51), where the rest of the live set is weakest. They form the
-    Macro Rotation agent. (Seasonality stayed experimental — deep −54% maxDD.)
+    SectorRotation + CrossAsset were briefly promoted 2026-07-23 then reverted:
+    despite topping the avg-per-signal metric (+1.08%, +0.99%), the full-pool
+    64-year run showed they *lowered* the honest walk-forward (9.4%→8.7% CAGR)
+    and worsened drawdown — they dilute the compounding ensemble, so they stay
+    experimental (their weight seeds still inform the allocator's cold start).
     """
     return [
         TrendFollowing(),
@@ -1083,8 +1083,6 @@ def default_strategies() -> list[Strategy]:
         BollingerReversion(),
         TSMomentum(),
         FiftyTwoWeekHigh(),
-        SectorRotation(),
-        CrossAsset(),
     ]
 
 
@@ -1109,6 +1107,8 @@ def experimental_strategies() -> list[Strategy]:
         Supertrend(),
         AdxTrend(),
         KeltnerBreakout(),
+        SectorRotation(),
+        CrossAsset(),
         Seasonality(),
     ]
 

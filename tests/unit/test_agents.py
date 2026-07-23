@@ -13,14 +13,10 @@ from src.trading.strategies import default_strategies, experimental_strategies
 def test_build_agents_partitions_live_set():
     agents = build_agents()
     names = {a.name for a in agents}
-    # The live 10 populate Core, Low-Vol Quality, Defensive, and (since the
-    # 2026-07-23 promotion of sector_rotation/cross_asset) Macro Rotation.
-    assert names == {
-        "core_momentum",
-        "low_vol_quality",
-        "defensive",
-        "macro_rotation",
-    }
+    # The live 8 populate Core, Low-Vol Quality, and Defensive only. (Macro
+    # Rotation goes live only if sector_rotation/cross_asset are promoted; the
+    # 2026-07-23 promotion was reverted after the walk-forward regressed.)
+    assert names == {"core_momentum", "low_vol_quality", "defensive"}
     # Every live strategy lands in exactly one agent.
     covered = [s for a in agents for s in a.strategy_names]
     assert sorted(covered) == sorted(s.name for s in default_strategies())

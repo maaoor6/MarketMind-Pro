@@ -72,6 +72,18 @@ def test_volatile_regime_never_full_size():
     assert size == 0.5
 
 
+@pytest.mark.unit
+def test_scaled_band_is_graded_and_monotonic():
+    # Buy multiplier shrinks smoothly as the tape weakens (no hard step).
+    strong = _decision_from_score(0.05, "BULL")
+    mid = _decision_from_score(-0.30, "BULL")
+    weak = _decision_from_score(-0.60, "BULL")
+    assert strong[0] == mid[0] == weak[0] == "SCALED"
+    assert 1.0 > strong[1] > mid[1] > weak[1] >= 0.25
+    # OFF only on genuinely stacked risk.
+    assert _decision_from_score(-0.80, "BULL") == ("OFF", 0.0)
+
+
 # ── net liquidity + returns helpers ────────────────────────────────────
 
 

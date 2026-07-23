@@ -170,8 +170,7 @@ def test_new_strategies_registration():
 
     live = {s.name for s in default_strategies()}
     experimental = {s.name for s in experimental_strategies()}
-    # sector_rotation + cross_asset promoted to live (2026-07-23);
-    # seasonality stays experimental.
-    assert {"sector_rotation", "cross_asset"} <= live
-    assert "seasonality" in experimental
-    assert "seasonality" not in live
+    # All three new-method strategies stay experimental — sector_rotation +
+    # cross_asset were promoted 2026-07-23 then reverted (walk-forward regressed).
+    assert {"sector_rotation", "cross_asset", "seasonality"} <= experimental
+    assert not ({"sector_rotation", "cross_asset", "seasonality"} & live)

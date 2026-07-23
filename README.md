@@ -23,7 +23,7 @@
 | **News Sentiment** | Google News RSS + Yahoo Finance → score -1.0 to +1.0 with source diversity |
 | **Telegram Bot** | Full English analysis on demand + automated pre-market and post-close reports |
 | **Price Alerts** | `/setalert` — above/below price alerts checked every 5 minutes |
-| **Autonomous Paper Trading** | Multi-agent Orchestrator (10 backtest-promoted strategies in thematic agents) trading a simulated $10k StockArena account with a zero-cost macro/market-timing gate, dynamic stock discovery, evidence-based weighting that disables proven losers, per-agent circuit breakers, ATR sizing, risk management, and a Telegram kill-switch |
+| **Autonomous Paper Trading** | Multi-agent Orchestrator (8 backtest-promoted strategies in thematic agents) trading a simulated $10k StockArena account with a zero-cost macro/market-timing gate, dynamic stock discovery, evidence-based weighting that disables proven losers, per-agent circuit breakers, ATR sizing, risk management, and a Telegram kill-switch |
 | **Backtesting** | Offline walk-forward backtests: 24 strategies over up to ~60 years across a ~435-ticker pool, plus stress (2008/2020/2022) and Monte-Carlo overfitting checks; results seed the live agent's strategy weights |
 | **Interactive Charts** | Candlestick + Volume + RSI + Fibonacci published to GitHub Pages |
 | **Streamlit Dashboard** | Local browser UI for ad-hoc analysis without Telegram |
@@ -126,10 +126,9 @@ python -m src.agents.telegram_dispatcher
 
 An optional trading agent runs alongside the bot and paper-trades a **$10k simulated
 StockArena account** — no real money is ever involved. Every cycle (default 5 minutes) it
-builds a quality-filtered universe (screener candidates must be in a long-term uptrend, blended half-half with a stable watchlist core), runs 10 backtest-promoted strategies
+builds a quality-filtered universe (screener candidates must be in a long-term uptrend, blended half-half with a stable watchlist core), runs 8 backtest-promoted strategies
 (trend following, breakout, dip buying, gap momentum, multi-timeframe alignment, Bollinger
-reversion, 12-month momentum, 52-week-high momentum, sector rotation, cross-asset intermarket)
-over daily/weekly/monthly timeframes,
+reversion, 12-month momentum, 52-week-high momentum) over daily/weekly/monthly timeframes,
 weights capital toward proven winners — a strategy whose measured average turns negative is
 disabled automatically until it recovers — ranks buy ideas across all tickers by evidence,
 sizes positions down in high-volatility names and during portfolio drawdowns, lets
@@ -156,7 +155,7 @@ is persisted and reported to the admin chat.
 
 ## Backtesting (offline, local, free)
 
-Test 24 trading strategies — the live agent's 10 promoted winners plus 14 experimental
+Test 24 trading strategies — the live agent's 8 promoted winners plus 16 experimental
 (backtest-only) ones, including three new-method strategies (sector rotation, cross-asset
 intermarket, seasonality) — and the agent simulations (all-strategy research agent, the exact
 live configuration, an optional macro-gated variant, and walk-forward versions), on up to ~60

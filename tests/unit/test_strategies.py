@@ -1144,8 +1144,10 @@ def test_keltner_fails_closed_without_band():
 
 
 @pytest.mark.unit
-def test_default_strategies_are_the_promoted_ten():
-    # Live set: the 2026-07-09 eight + SectorRotation/CrossAsset (2026-07-23).
+def test_default_strategies_are_the_promoted_eight():
+    # Live set promoted 2026-07-09 from the 64-year full-pool backtest.
+    # (sector_rotation/cross_asset were briefly promoted 2026-07-23 then
+    # reverted — they lowered the walk-forward; they stay experimental.)
     assert [type(s) for s in default_strategies()] == [
         TrendFollowing,
         Breakout,
@@ -1155,13 +1157,11 @@ def test_default_strategies_are_the_promoted_ten():
         BollingerReversion,
         TSMomentum,
         FiftyTwoWeekHigh,
-        SectorRotation,
-        CrossAsset,
     ]
 
 
 @pytest.mark.unit
-def test_experimental_strategies_are_the_backtest_fourteen():
+def test_experimental_strategies_are_the_backtest_sixteen():
     assert [type(s) for s in experimental_strategies()] == [
         MomentumDaily,
         MeanReversion,
@@ -1176,6 +1176,8 @@ def test_experimental_strategies_are_the_backtest_fourteen():
         Supertrend,
         AdxTrend,
         KeltnerBreakout,
+        SectorRotation,
+        CrossAsset,
         Seasonality,
     ]
     # No name collisions across the combined set.
