@@ -963,8 +963,42 @@ async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 f"📉 <b>Exec drift:</b> {drift.avg_adverse_pct:+.2f}% avg "
                 f"over {drift.count} fills (worst {drift.worst_adverse_pct:+.2f}%)",
             ]
+        # Infra-agent directive (data-quality / sentiment / risk blocks).
+        if state:
+            blocked = state.get("infra_blocked", [])
+            if blocked:
+                lines += [
+                    "",
+                    f"🛡️ <b>Risk blocks:</b> {', '.join(html.escape(t) for t in blocked)}",
+                ]
     except Exception:  # noqa: BLE001
         logger.debug("portfolio_orchestrator_state_failed")
+
+    # Quarantined strategies (drift monitor) + shadow-mode candidates.
+    try:
+        from src.trading.drift_monitor import quarantined_strategies
+        from src.trading.shadow import ShadowBook
+        from src.trading.strategies import experimental_strategies
+
+        quarantined = await quarantined_strategies(
+            [s.name for s in experimental_strategies()]
+        )
+        if quarantined:
+            lines += [
+                "",
+                f"🚫 <b>Quarantined:</b> {', '.join(sorted(quarantined))}",
+            ]
+        shadow = await ShadowBook().status()
+        if shadow:
+            lines += ["", "👻 <b>Shadow (paper) candidates:</b>"]
+            for rec in shadow:
+                flag = "✅ ready" if rec.ready else f"{rec.days_in_shadow or 0:.0f}d"
+                lines.append(
+                    f"  • {html.escape(rec.strategy)}: {flag} "
+                    f"({rec.signal_count} signals)"
+                )
+    except Exception:  # noqa: BLE001
+        logger.debug("portfolio_shadow_state_failed")
 
     await msg_obj.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
