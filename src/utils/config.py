@@ -253,6 +253,16 @@ class Settings(BaseSettings):
     # Comma-separated experimental strategy names currently in shadow mode.
     shadow_strategy_names: str = Field(default="")
 
+    # ── Concept-drift monitor / auto-quarantine (Phase 2C.3) ──────────
+    # A live/shadow strategy whose realized-return stream decays vs its
+    # backtest distribution is auto-quarantined (demoted to experimental). KS
+    # two-sample significance level + downward-CUSUM threshold/slack (return
+    # fraction units) + minimum sample size before any check runs.
+    drift_ks_alpha: float = Field(default=0.05)
+    drift_cusum_threshold: float = Field(default=0.15)
+    drift_cusum_slack: float = Field(default=0.0)
+    drift_min_samples: int = Field(default=20)
+
 
 @lru_cache
 def get_settings() -> Settings:

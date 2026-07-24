@@ -31,6 +31,7 @@ from src.trading.agents import (
     agent_for_strategy,
     build_agents,
 )
+from src.trading.drift_monitor import quarantined_strategies
 from src.trading.execution_tracker import ExecutionTracker
 from src.trading.infra_agents import (
     NO_TIGHTENING,
@@ -315,6 +316,12 @@ class Orchestrator(TradingAgent):
             if (agent := agent_for_strategy(self._agents, name)) is None
             or agent.name not in frozen
         }
+        # Auto-quarantine (drift monitor): a decayed strategy stops buying while
+        # its signals keep being recorded, so it re-enables when it recovers.
+        quarantined = await quarantined_strategies([s.name for s in self._strategies])
+        if quarantined:
+            active_names -= quarantined
+            logger.info("strategies_quarantined", names=sorted(quarantined))
 
         # 2b. Infra agents observe the cycle → tighten-only directive.
         directive = await self._run_infra_agents(contexts, portfolio, state)
