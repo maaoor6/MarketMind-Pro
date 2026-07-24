@@ -24,6 +24,7 @@ import pandas as pd
 
 from src.database.cache import cache
 from src.quant.indicators import sma
+from src.trading.treasury import treasury_yield_curve
 from src.utils.config import settings
 from src.utils.logger import get_logger
 from src.utils.timezone_utils import now_us
@@ -196,6 +197,11 @@ class MacroDataProvider:
         dgs2 = await self._fred_latest("DGS2")
         if dgs10 is not None and dgs2 is not None:
             out["yield_curve"] = dgs10 - dgs2
+        else:
+            # Free fallback: official Treasury par-yield curve (no FRED key).
+            spread = await treasury_yield_curve()
+            if spread is not None:
+                out["yield_curve"] = spread
 
         # Fed net liquidity = balance sheet − reverse repo − Treasury account.
         walcl = await self._fred_series("WALCL", limit=30)
