@@ -82,6 +82,15 @@ class Settings(BaseSettings):
     # provider abstraction (src/data). Callers get a composite that tries each
     # in order and fails over. Phase 1 adds edgar/stooq/finnhub/alphavantage.
     data_provider_priority: str = Field(default="yfinance")
+    # Data-quality gate (src/data/validation.py). When ≥2 providers return a
+    # price, flag disagreement beyond this fraction (0.02 = 2%). Cross-checks
+    # are fail-open: a single source is always accepted.
+    data_consensus_tolerance_pct: float = Field(default=0.02)
+    # A live quote older than this many seconds is flagged stale.
+    data_quality_max_age_seconds: float = Field(default=3600.0)
+    # Comma-separated providers used as the independent cross-check source for
+    # the OHLCV close (empty → cross-check disabled, single-source fail-open).
+    data_crosscheck_providers: str = Field(default="")
 
     # GitHub
     github_pages_repo: str = Field(default="maaoor6/MarketMind-Pro")

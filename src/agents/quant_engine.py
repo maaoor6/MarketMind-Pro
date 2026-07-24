@@ -9,6 +9,11 @@ import pandas as pd
 from sqlalchemy import select
 
 from src.data import get_provider
+from src.data.validation import (
+    cross_check_close,
+    crosscheck_providers,
+    persist_verdict,
+)
 from src.database.cache import cache
 from src.database.models import PriceHistory
 from src.database.session import AsyncSessionLocal
@@ -114,6 +119,23 @@ class QuantEngine:
         }
 
         signals = generate_signals(closes, volumes)
+
+        # Cross-provider data-quality check (opportunistic, fail-open): only
+        # runs when DATA_CROSSCHECK_PROVIDERS is set, so the default path adds
+        # zero network. Flags are persisted to data:quality:{ticker} for the
+        # Phase-2 DataValidation agent + Telegram to surface.
+        if crosscheck_providers():
+            try:
+                verdict = await cross_check_close(
+                    ticker, reference_close=float(closes.iloc[-1])
+                )
+                await persist_verdict(ticker, verdict)
+                if not verdict.ok:
+                    logger.warning(
+                        "data_quality_flag", ticker=ticker, flags=verdict.flags
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("crosscheck_skipped", ticker=ticker, error=str(exc))
 
         # Override price with live quote (pre-market / regular / after-hours)
         try:
