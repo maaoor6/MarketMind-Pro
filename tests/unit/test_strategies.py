@@ -12,6 +12,7 @@ from src.trading.strategies import (
     DipBuyer,
     DonchianBreakout,
     DoubleSeven,
+    DualMomentum,
     FiftyTwoWeekHigh,
     GapMomentum,
     GoldenCross,
@@ -30,6 +31,7 @@ from src.trading.strategies import (
     TrendFollowing,
     TSMomentum,
     VolContraction,
+    VolTargetTrend,
     default_strategies,
     experimental_strategies,
 )
@@ -1161,7 +1163,7 @@ def test_default_strategies_are_the_promoted_eight():
 
 
 @pytest.mark.unit
-def test_experimental_strategies_are_the_backtest_sixteen():
+def test_experimental_strategies_are_the_backtest_set():
     assert [type(s) for s in experimental_strategies()] == [
         MomentumDaily,
         MeanReversion,
@@ -1179,7 +1181,9 @@ def test_experimental_strategies_are_the_backtest_sixteen():
         SectorRotation,
         CrossAsset,
         Seasonality,
+        DualMomentum,
+        VolTargetTrend,
     ]
     # No name collisions across the combined set.
     names = [s.name for s in [*default_strategies(), *experimental_strategies()]]
-    assert len(names) == len(set(names)) == 24
+    assert len(names) == len(set(names)) == 26

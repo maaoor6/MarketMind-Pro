@@ -34,6 +34,7 @@ _ROLE_MAP: dict[str, str] = {
     "adx_trend": "core_momentum",
     "supertrend": "core_momentum",
     "donchian_breakout": "core_momentum",
+    "dual_momentum": "core_momentum",
     # Low-vol quality — quiet trends, pullbacks, selectivity.
     "low_vol_trend": "low_vol_quality",
     "multi_timeframe": "low_vol_quality",
@@ -41,6 +42,7 @@ _ROLE_MAP: dict[str, str] = {
     "golden_cross": "low_vol_quality",
     "vol_contraction": "low_vol_quality",
     "keltner_breakout": "low_vol_quality",
+    "vol_target_trend": "low_vol_quality",
     # Defensive / mean-reversion — the BEAR specialists.
     "dip_buyer": "defensive",
     "bollinger_reversion": "defensive",

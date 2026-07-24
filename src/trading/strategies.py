@@ -1060,6 +1060,91 @@ class Seasonality(Strategy):
         return self._hold(ctx, "no seasonal edge")
 
 
+class DualMomentum(Strategy):
+    """Antonacci dual momentum — absolute (12m) + recency, long-term filtered.
+
+    Buys only names with positive 12-month AND positive 3-month absolute return
+    while above the 200-day average (the trend filter). Differs from
+    ``ts_momentum`` (12−1m signal) by requiring recent 3m confirmation, which
+    cuts entries into stalling leaders. Experimental (2026-07-24) — grounded in
+    ts_momentum's standalone edge; promotion needs a walk-forward win.
+    """
+
+    name = "dual_momentum"
+    timeframe = "1mo"
+    eval_horizon_hours = 480
+
+    def evaluate(self, ctx: StrategyContext) -> StrategySignal:
+        price = ctx.price
+        ret_12m = ctx.signals.get("ret_12m")
+        ret_3m = ctx.signals.get("ret_3m")
+        sma200 = (ctx.signals.get("moving_averages") or {}).get("SMA_200")
+        if price is None or ret_12m is None or ret_3m is None or sma200 is None:
+            return self._hold(ctx, "insufficient data")
+        r12 = float(ret_12m)
+        r3 = float(ret_3m)
+
+        if ctx.position is not None and (r12 < 0 or price < sma200):
+            return self._signal(
+                ctx, Action.SELL, 0.65, f"absolute momentum lost (12m {r12:+.1%})"
+            )
+        if r12 > 0 and r3 > 0 and price > sma200:
+            confidence = 0.55 + min(r12, 0.35)
+            return self._signal(
+                ctx,
+                Action.BUY,
+                confidence,
+                f"dual momentum: 12m {r12:+.1%}, 3m {r3:+.1%}, above SMA200",
+            )
+        return self._hold(ctx, "no dual-momentum setup")
+
+
+class VolTargetTrend(Strategy):
+    """Trend-following gated by a calm-volatility regime (vol-target style).
+
+    Enters a confirmed uptrend (SMA50 > SMA200, price > SMA200) only when 20-day
+    realized volatility is below a target, and sizes confidence inversely to
+    vol — capturing the low-vol-trend anomaly through an explicit trend filter.
+    Exits on a break below SMA200 or a volatility spike. Experimental
+    (2026-07-24); promotion needs a walk-forward win.
+    """
+
+    name = "vol_target_trend"
+    timeframe = "1wk"
+    eval_horizon_hours = 168
+    target_vol: float = 0.30
+    exit_vol: float = 0.55
+
+    def evaluate(self, ctx: StrategyContext) -> StrategySignal:
+        price = ctx.price
+        mas = ctx.signals.get("moving_averages") or {}
+        sma50 = mas.get("SMA_50")
+        sma200 = mas.get("SMA_200")
+        vol = ctx.signals.get("vol_20d")
+        if price is None or sma50 is None or sma200 is None or vol is None:
+            return self._hold(ctx, "insufficient data")
+        vol = float(vol)
+
+        if ctx.position is not None:
+            if price < sma200:
+                return self._signal(
+                    ctx, Action.SELL, 0.7, f"trend broke below SMA200 ({sma200:.2f})"
+                )
+            if vol > self.exit_vol:
+                return self._signal(ctx, Action.SELL, 0.6, f"vol spiked to {vol:.0%}")
+
+        if sma50 > sma200 and price > sma200 and vol < self.target_vol:
+            # Lower vol → higher confidence (vol-target intuition).
+            confidence = 0.55 + min(self.target_vol - vol, 0.2)
+            return self._signal(
+                ctx,
+                Action.BUY,
+                confidence,
+                f"uptrend (SMA50>SMA200) at calm vol {vol:.0%}",
+            )
+        return self._hold(ctx, "no vol-target trend setup")
+
+
 def default_strategies() -> list[Strategy]:
     """The standard strategy set the LIVE agent evaluates every cycle.
 
@@ -1110,6 +1195,8 @@ def experimental_strategies() -> list[Strategy]:
         SectorRotation(),
         CrossAsset(),
         Seasonality(),
+        DualMomentum(),
+        VolTargetTrend(),
     ]
 
 
