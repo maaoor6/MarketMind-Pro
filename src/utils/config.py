@@ -78,6 +78,11 @@ class Settings(BaseSettings):
     alpha_vantage_key: str = Field(default="")
     exchangerate_api_key: str = Field(default="")
 
+    # Market-data providers — comma-separated priority list used by the
+    # provider abstraction (src/data). Callers get a composite that tries each
+    # in order and fails over. Phase 1 adds edgar/stooq/finnhub/alphavantage.
+    data_provider_priority: str = Field(default="yfinance")
+
     # GitHub
     github_pages_repo: str = Field(default="maaoor6/MarketMind-Pro")
     github_token: str = Field(default="")

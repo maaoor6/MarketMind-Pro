@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from datetime import datetime
 
 import pandas as pd
-import yfinance as yf
 from sqlalchemy import select
 
+from src.data import get_provider
 from src.database.cache import cache
 from src.database.models import PriceHistory
 from src.database.session import AsyncSessionLocal
@@ -63,24 +63,10 @@ class QuantEngine:
                 logger.debug("quote_cache_hit", ticker=ticker)
                 return pd.DataFrame(cached)
 
-        loop = asyncio.get_event_loop()
-        df: pd.DataFrame = await loop.run_in_executor(
-            None,
-            lambda: yf.download(
-                ticker,
-                period=period,
-                interval=interval,
-                auto_adjust=True,
-                progress=False,
-            ),
-        )
-
-        if df.empty:
-            raise ValueError(f"No data returned for {ticker}")
-
-        # Flatten MultiIndex columns when yfinance returns them for a single ticker
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+        # Fetch via the provider abstraction (yfinance by default, with
+        # fail-over to any configured secondary source). Empty-data + column
+        # flattening are handled inside the provider.
+        df = await get_provider().fetch_ohlcv(ticker, period=period, interval=interval)
 
         if interval == "1m":
             await cache.cache_quote(ticker, df.tail(10).to_dict())
@@ -101,15 +87,7 @@ class QuantEngine:
         Raises:
             ValueError: If no live price is available.
         """
-        loop = asyncio.get_event_loop()
-        fi = await loop.run_in_executor(None, lambda: yf.Ticker(ticker).fast_info)
-        last_price = getattr(fi, "last_price", None)
-        prev_close = getattr(fi, "previous_close", None)
-        if last_price is None:
-            raise ValueError(f"No live price available for {ticker}")
-        return float(last_price), (
-            float(prev_close) if prev_close is not None else None
-        )
+        return await get_provider().fetch_live_price(ticker)
 
     async def analyze(self, ticker: str) -> QuantSignal:
         """Run full quantitative analysis for a ticker.
