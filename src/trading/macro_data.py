@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, dataclass
+from datetime import time as dt_time
 
 import httpx
 import pandas as pd
@@ -25,6 +26,7 @@ from src.database.cache import cache
 from src.quant.indicators import sma
 from src.utils.config import settings
 from src.utils.logger import get_logger
+from src.utils.timezone_utils import now_us
 
 logger = get_logger(__name__)
 
@@ -32,6 +34,10 @@ _CACHE_KEY = "macro:data"
 _CACHE_TTL = 900  # 15 min — macro state moves slowly
 
 _FRED_URL = "https://api.stlouisfed.org/fred/series/observations"
+
+# A daily bar dated *today* before this ET time is still forming (partial) — a
+# pre-market snapshot skewed the SMA flags in a live smoke test, so we drop it.
+_NYSE_CLOSE = dt_time(16, 0)
 
 
 @dataclass
@@ -57,6 +63,43 @@ class MacroData:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def _clean_closes(df: pd.DataFrame) -> pd.Series:
+    """Return the Close series with NaNs and any partial current-day bar removed.
+
+    yfinance's daily download appends a still-forming bar for the current
+    session (and can return a transient malformed frame pre-market). Trusting
+    its last value flipped borderline SMA flags in a live smoke test, so we
+    drop a today-dated bar until the US session has actually closed.
+    """
+    closes = df["Close"].squeeze().dropna()
+    if closes.empty:
+        return closes
+    try:
+        last_date = closes.index[-1].date()
+        now = now_us()
+        if last_date == now.date() and now.time() < _NYSE_CLOSE:
+            closes = closes.iloc[:-1]
+    except (AttributeError, IndexError, TypeError):
+        # Non-datetime index or empty after slicing — return what we have.
+        pass
+    return closes
+
+
+def _sma_flag(closes: pd.Series, period: int) -> bool | None:
+    """Is the last close above its ``period``-bar SMA? None if data insufficient.
+
+    Returning None (not False) on a short/empty series keeps the gate fail-open:
+    ``price > NaN`` silently evaluates False and would fake a bearish reading.
+    """
+    if closes is None or len(closes) < period:
+        return None
+    ma = sma(closes, period).iloc[-1]
+    last = closes.iloc[-1]
+    if pd.isna(ma) or pd.isna(last):
+        return None
+    return bool(float(last) > float(ma))
 
 
 def _pct_change(series: pd.Series, window: int) -> float | None:
@@ -106,7 +149,7 @@ class MacroDataProvider:
     async def _trend(self, ticker: str, window: int) -> float | None:
         try:
             df = await self._quant.fetch_price_data(ticker, period="1y", interval="1d")
-            return _pct_change(df["Close"].squeeze(), window)
+            return _pct_change(_clean_closes(df), window)
         except Exception as exc:  # noqa: BLE001
             logger.debug("macro_trend_failed", ticker=ticker, error=str(exc))
             return None
@@ -115,18 +158,22 @@ class MacroDataProvider:
         out: dict = {}
         try:
             spy = await self._quant.fetch_price_data("SPY", period="2y", interval="1d")
-            closes = spy["Close"].squeeze()
-            price = float(closes.iloc[-1])
-            out["spy_above_sma50"] = price > float(sma(closes, 50).iloc[-1])
-            out["spy_above_sma200"] = price > float(sma(closes, 200).iloc[-1])
+            closes = _clean_closes(spy)
+            # Only publish a flag when it is trustworthy; None ⇒ neutral in the
+            # score, never a fake bearish False from insufficient/partial data.
+            for key, flag in (
+                ("spy_above_sma50", _sma_flag(closes, 50)),
+                ("spy_above_sma200", _sma_flag(closes, 200)),
+            ):
+                if flag is not None:
+                    out[key] = flag
         except Exception as exc:  # noqa: BLE001
             logger.debug("macro_spy_failed", error=str(exc))
         try:
             qqq = await self._quant.fetch_price_data("QQQ", period="2y", interval="1d")
-            qcloses = qqq["Close"].squeeze()
-            out["qqq_above_sma200"] = float(qcloses.iloc[-1]) > float(
-                sma(qcloses, 200).iloc[-1]
-            )
+            flag = _sma_flag(_clean_closes(qqq), 200)
+            if flag is not None:
+                out["qqq_above_sma200"] = flag
         except Exception as exc:  # noqa: BLE001
             logger.debug("macro_qqq_failed", error=str(exc))
         return out
@@ -168,7 +215,7 @@ class MacroDataProvider:
         try:
             hyg = await self._quant.fetch_price_data("HYG", period="6mo", interval="1d")
             lqd = await self._quant.fetch_price_data("LQD", period="6mo", interval="1d")
-            ratio = (hyg["Close"].squeeze() / lqd["Close"].squeeze()).dropna()
+            ratio = (_clean_closes(hyg) / _clean_closes(lqd)).dropna()
             out["hyg_lqd_trend"] = _pct_change(ratio, 21)
         except Exception as exc:  # noqa: BLE001
             logger.debug("macro_credit_failed", error=str(exc))

@@ -10,7 +10,13 @@ from src.trading.macro_calendar import (
     active_blackout,
     upcoming_events,
 )
-from src.trading.macro_data import MacroData, _net_liquidity_trend, _pct_change
+from src.trading.macro_data import (
+    MacroData,
+    _clean_closes,
+    _net_liquidity_trend,
+    _pct_change,
+    _sma_flag,
+)
 from src.trading.macro_gate import (
     MacroState,
     MacroTimingGate,
@@ -105,6 +111,61 @@ def test_net_liquidity_trend_missing_leg_is_none():
 @pytest.mark.unit
 def test_pct_change_too_short_is_none():
     assert _pct_change(pd.Series([1.0, 2.0]), 5) is None
+
+
+# ── data-quality guards (_clean_closes / _sma_flag) ────────────────────
+
+
+def _daily_df(values: list[float], *, end: datetime) -> pd.DataFrame:
+    idx = pd.date_range(end=end, periods=len(values), freq="D")
+    return pd.DataFrame({"Close": values}, index=idx)
+
+
+@pytest.mark.unit
+def test_sma_flag_insufficient_bars_is_none():
+    # Fewer than `period` bars ⇒ None (neutral), never a fake bearish False.
+    assert _sma_flag(pd.Series([100.0, 101.0, 102.0]), 50) is None
+
+
+@pytest.mark.unit
+def test_sma_flag_above_and_below():
+    rising = pd.Series([float(i) for i in range(1, 61)])
+    assert _sma_flag(rising, 50) is True
+    falling = pd.Series([float(i) for i in range(60, 0, -1)])
+    assert _sma_flag(falling, 50) is False
+
+
+@pytest.mark.unit
+def test_sma_flag_nan_last_is_none():
+    s = pd.Series([float(i) for i in range(1, 60)] + [float("nan")])
+    assert _sma_flag(s, 50) is None
+
+
+@pytest.mark.unit
+def test_clean_closes_drops_partial_today_bar(monkeypatch):
+    # Pin "now" to 10:00 ET on a fixed date so the test is wall-clock-independent.
+    fixed = _ET.localize(datetime(2026, 3, 4, 10, 0))
+    monkeypatch.setattr("src.trading.macro_data.now_us", lambda: fixed)
+    df = _daily_df([100.0, 101.0, 999.0], end=datetime(2026, 3, 4))
+    cleaned = _clean_closes(df)
+    assert len(cleaned) == 2  # the still-forming 999.0 bar is dropped
+    assert 999.0 not in cleaned.values
+
+
+@pytest.mark.unit
+def test_clean_closes_keeps_bar_after_close(monkeypatch):
+    # Same today-dated bar, but the session has closed (16:30 ET) ⇒ keep it.
+    fixed = _ET.localize(datetime(2026, 3, 4, 16, 30))
+    monkeypatch.setattr("src.trading.macro_data.now_us", lambda: fixed)
+    df = _daily_df([100.0, 101.0, 102.0], end=datetime(2026, 3, 4))
+    assert len(_clean_closes(df)) == 3
+
+
+@pytest.mark.unit
+def test_clean_closes_keeps_completed_history():
+    # All bars dated in the past ⇒ nothing dropped.
+    df = _daily_df([100.0, 101.0, 102.0], end=datetime(2020, 1, 3))
+    assert len(_clean_closes(df)) == 3
 
 
 # ── calendar ───────────────────────────────────────────────────────────
