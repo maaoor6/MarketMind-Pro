@@ -49,6 +49,13 @@ def configure_logging() -> None:
         level=log_level,
     )
 
+    # httpx/httpcore log every request line at INFO ("HTTP Request: GET <url>").
+    # That URL can carry a secret in its query/path (Google ?key=, FRED
+    # ?api_key=, ExchangeRate /v6/<key>/), so raise their level to WARNING to
+    # keep API keys out of the logs.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
 
 def get_logger(name: str) -> structlog.BoundLogger:
     """Get a named structured logger."""

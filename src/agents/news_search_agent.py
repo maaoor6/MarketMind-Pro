@@ -216,8 +216,13 @@ class NewsSearchAgent:
                     }
                     for item in items
                 ]
-            except Exception as exc:
-                logger.error("google_search_failed", error=str(exc))
+            except httpx.HTTPStatusError as exc:
+                # str(exc) embeds the full request URL incl. the ?key=... secret;
+                # log only the status code so the API key never reaches the logs.
+                logger.error("google_search_failed", status=exc.response.status_code)
+                return []
+            except Exception as exc:  # noqa: BLE001
+                logger.error("google_search_failed", error=type(exc).__name__)
                 return []
 
     # ── RSS fetching ──────────────────────────────────────────────────────────

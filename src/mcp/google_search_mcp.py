@@ -224,9 +224,18 @@ async def _search_web(
                     text=json.dumps({"results": results, "query": full_query}),
                 )
             ]
-        except Exception as exc:
-            logger.error("google_search_mcp_failed", error=str(exc))
-            return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
+        except httpx.HTTPStatusError as exc:
+            # str(exc) / the response body embed the request URL incl. ?key=...;
+            # never surface either in the log or the tool response.
+            logger.error("google_search_mcp_failed", status=exc.response.status_code)
+            return [
+                TextContent(type="text", text=json.dumps({"error": "search_failed"}))
+            ]
+        except Exception as exc:  # noqa: BLE001
+            logger.error("google_search_mcp_failed", error=type(exc).__name__)
+            return [
+                TextContent(type="text", text=json.dumps({"error": "search_failed"}))
+            ]
 
 
 async def _scrape_page(url: str) -> list[TextContent]:

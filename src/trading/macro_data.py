@@ -246,8 +246,17 @@ class MacroDataProvider:
                 resp = await client.get(_FRED_URL, params=params)
                 resp.raise_for_status()
                 obs = resp.json().get("observations", [])
+        except httpx.HTTPStatusError as exc:
+            # str(exc) embeds the request URL incl. ?api_key=...; log only the
+            # status so the FRED key never reaches the logs.
+            logger.debug(
+                "fred_fetch_failed", series=series_id, status=exc.response.status_code
+            )
+            return None
         except Exception as exc:  # noqa: BLE001
-            logger.debug("fred_fetch_failed", series=series_id, error=str(exc))
+            logger.debug(
+                "fred_fetch_failed", series=series_id, error=type(exc).__name__
+            )
             return None
         values: list[float] = []
         for o in obs:
