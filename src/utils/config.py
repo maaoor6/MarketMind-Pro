@@ -245,6 +245,14 @@ class Settings(BaseSettings):
     # Rolling lookback (trading days) for the correlation / beta estimates.
     risk_corr_lookback_days: int = Field(default=60)
 
+    # ── Shadow / paper pipeline (Phase 2B.4) ──────────────────────────
+    # A walk-forward winner must run this many days in read-only shadow mode
+    # (signals recorded + scored, never executed) with no concept drift before
+    # it can be promoted into default_strategies().
+    shadow_mode_days: int = Field(default=30)
+    # Comma-separated experimental strategy names currently in shadow mode.
+    shadow_strategy_names: str = Field(default="")
+
 
 @lru_cache
 def get_settings() -> Settings:

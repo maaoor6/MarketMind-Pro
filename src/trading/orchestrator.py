@@ -40,6 +40,7 @@ from src.trading.infra_agents import (
     build_infra_agents,
 )
 from src.trading.macro_gate import MacroState, MacroTimingGate
+from src.trading.shadow import ShadowBook
 from src.trading.strategies import (
     SECTOR_ROTATION_ETFS,
     Action,
@@ -78,6 +79,8 @@ class Orchestrator(TradingAgent):
         self._gate = MacroTimingGate(quant, news_agent=self._news)
         self._exec_tracker = ExecutionTracker()
         self._sector_cache: dict[str, str] = {}
+        # Shadow book — walk-forward winners paper-traded before promotion.
+        self._shadow = ShadowBook()
         # Infra agents (tighten-only cycle observers). Empty when disabled.
         # RiskOverseer gets the live returns + sector callables.
         self._infra_agents = (
@@ -288,6 +291,12 @@ class Orchestrator(TradingAgent):
             if ctx is not None:
                 contexts[ticker] = ctx
         self._inject_sector_ranks(contexts)
+
+        # Shadow strategies are evaluated read-only (recorded, never executed).
+        try:
+            await self._shadow.observe(contexts)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("shadow_observe_failed", error=str(exc))
 
         # 1. Protective exits always run first (never gated).
         for plan in await self._risk.check_exits(portfolio, contexts):
