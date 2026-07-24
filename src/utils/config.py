@@ -91,6 +91,14 @@ class Settings(BaseSettings):
     # Comma-separated providers used as the independent cross-check source for
     # the OHLCV close (empty → cross-check disabled, single-source fail-open).
     data_crosscheck_providers: str = Field(default="")
+    # SEC EDGAR requires a descriptive User-Agent with a contact (fair-access
+    # rule). Free, no key. Override with your own contact for production use.
+    sec_edgar_user_agent: str = Field(
+        default="MarketMind-Pro/1.0 (research; contact via admin)"
+    )
+    # Free Finnhub API key (https://finnhub.io) — quote / company-news /
+    # earnings-calendar. Empty → the Finnhub provider fails open (skipped).
+    finnhub_api_key: str = Field(default="")
 
     # GitHub
     github_pages_repo: str = Field(default="maaoor6/MarketMind-Pro")

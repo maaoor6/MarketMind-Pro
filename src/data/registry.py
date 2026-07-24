@@ -40,11 +40,13 @@ def _register_defaults() -> None:
     """Register the built-in providers (import-time, lazy factories)."""
     if "yfinance" in _FACTORIES:
         return
+    from src.data.providers.edgar_provider import EdgarProvider
     from src.data.providers.stooq_provider import StooqProvider
     from src.data.providers.yfinance_provider import YFinanceProvider
 
     register_provider("yfinance", YFinanceProvider)
     register_provider("stooq", StooqProvider)
+    register_provider("edgar", EdgarProvider)
 
 
 class CompositeProvider(MarketDataProvider):

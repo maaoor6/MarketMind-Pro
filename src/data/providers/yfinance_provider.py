@@ -15,6 +15,7 @@ import pandas as pd
 import yfinance as yf
 
 from src.data.provider import (
+    CAP_FUNDAMENTALS,
     CAP_LIVE_PRICE,
     CAP_OHLCV,
     CAP_SCREEN,
@@ -29,7 +30,7 @@ class YFinanceProvider(MarketDataProvider):
     """Yahoo Finance via the ``yfinance`` package (unofficial, free)."""
 
     name = "yfinance"
-    capabilities = frozenset({CAP_OHLCV, CAP_LIVE_PRICE, CAP_SCREEN})
+    capabilities = frozenset({CAP_OHLCV, CAP_LIVE_PRICE, CAP_SCREEN, CAP_FUNDAMENTALS})
 
     def __init__(self, screen_fn: Callable[..., dict] | None = None) -> None:
         # Injectable for tests; defaults to the real yfinance screener.
@@ -73,6 +74,11 @@ class YFinanceProvider(MarketDataProvider):
         """Run a Yahoo predefined screener (e.g. ``day_gainers``)."""
         payload = await asyncio.to_thread(self._screen_fn, screen_name, count=count)
         return payload if isinstance(payload, dict) else {}
+
+    async def fetch_fundamentals(self, ticker: str) -> dict:
+        """Return the raw yfinance ``info`` dict (rich profile fields)."""
+        info = await asyncio.to_thread(lambda: yf.Ticker(ticker).info)
+        return info or {}
 
     async def health_check(self) -> dict[str, str]:
         """Probe by fetching a few SPY bars."""

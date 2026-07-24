@@ -177,6 +177,49 @@ async def cross_check_close(
     return consensus_price(values, tolerance_pct)
 
 
+def crosscheck_fundamentals(
+    yf_info: dict,
+    edgar_facts: dict,
+    tolerance_pct: float = 0.05,
+) -> DataQualityVerdict:
+    """Cross-validate yfinance fundamentals against official SEC EDGAR facts.
+
+    Compares shares-outstanding (the most comparable, high-signal field) — a
+    large gap flags a stale or corrupt fundamentals record. Fail-open when
+    either side lacks the field. Pure; no I/O.
+    """
+    yf_shares = yf_info.get("sharesOutstanding")
+    ed_shares = edgar_facts.get("shares_outstanding")
+    values: dict[str, float] = {}
+    if yf_shares:
+        values["yfinance"] = float(yf_shares)
+    if ed_shares:
+        values["edgar"] = float(ed_shares)
+    verdict = consensus_price(values, tolerance_pct=tolerance_pct)
+    # Re-tag flags so the fundamentals context is clear downstream.
+    if verdict.flags and verdict.flags != ["no_sources"]:
+        return DataQualityVerdict(
+            ok=verdict.ok,
+            flags=[f"fundamentals_{f}" for f in verdict.flags],
+            chosen_value=verdict.chosen_value,
+            sources=verdict.sources,
+        )
+    return verdict
+
+
+async def edgar_fundamentals(ticker: str) -> dict:
+    """Best-effort official EDGAR fundamentals dict (empty on any failure)."""
+    try:
+        from src.data.providers.edgar_provider import EdgarProvider
+
+        return await EdgarProvider().fetch_fundamentals(ticker)
+    except Exception as exc:  # noqa: BLE001 — cross-check must never break callers
+        logger.debug(
+            "edgar_fundamentals_failed", ticker=ticker, error=type(exc).__name__
+        )
+        return {}
+
+
 async def persist_verdict(ticker: str, verdict: DataQualityVerdict) -> None:
     """Store a verdict at ``data:quality:{ticker}`` for the validation agent."""
     from src.database.cache import cache

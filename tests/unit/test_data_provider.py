@@ -51,7 +51,8 @@ def test_base_supports_and_capabilities():
     p = YFinanceProvider()
     assert p.supports(CAP_OHLCV)
     assert p.supports(CAP_LIVE_PRICE)
-    assert not p.supports("fundamentals")
+    assert p.supports("fundamentals")  # yfinance serves the rich info dict
+    assert not p.supports("insiders")  # not declared by the yfinance provider
 
 
 @pytest.mark.asyncio
