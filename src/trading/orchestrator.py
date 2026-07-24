@@ -32,6 +32,13 @@ from src.trading.agents import (
     build_agents,
 )
 from src.trading.execution_tracker import ExecutionTracker
+from src.trading.infra_agents import (
+    NO_TIGHTENING,
+    CycleContext,
+    InfraDirective,
+    aggregate_reports,
+    build_infra_agents,
+)
 from src.trading.macro_gate import MacroState, MacroTimingGate
 from src.trading.strategies import (
     SECTOR_ROTATION_ETFS,
@@ -71,6 +78,10 @@ class Orchestrator(TradingAgent):
         self._gate = MacroTimingGate(quant, news_agent=self._news)
         self._exec_tracker = ExecutionTracker()
         self._sector_cache: dict[str, str] = {}
+        # Infra agents (tighten-only cycle observers). Empty when disabled.
+        self._infra_agents = (
+            build_infra_agents() if settings.infra_agents_enabled else []
+        )
 
     async def _record_trade(self, plan, result) -> None:
         """Persist the trade (parent) then record live-vs-decision drift."""
@@ -187,6 +198,39 @@ class Orchestrator(TradingAgent):
                     until=until,
                 )
 
+    # ── Infra agents (tighten-only observers) ─────────────────────────
+
+    async def _run_infra_agents(
+        self, contexts: dict[str, StrategyContext], portfolio, state: MacroState
+    ) -> InfraDirective:
+        """Run every infra agent read-only and aggregate their reports."""
+        if not self._infra_agents:
+            return NO_TIGHTENING
+        cycle = CycleContext(
+            contexts=contexts,
+            portfolio=portfolio,
+            macro=state,
+            regime=state.regime,
+        )
+        reports = []
+        for agent in self._infra_agents:
+            try:
+                reports.append(await agent.observe(cycle))
+            except (
+                Exception
+            ) as exc:  # noqa: BLE001 — an agent must never break the cycle
+                logger.warning(
+                    "infra_agent_failed", agent=agent.name, error=type(exc).__name__
+                )
+        directive = aggregate_reports(reports)
+        if directive.blocked or directive.size_mult < 1.0:
+            logger.info(
+                "infra_directive",
+                blocked=sorted(directive.blocked),
+                size_mult=round(directive.size_mult, 3),
+            )
+        return directive
+
     # ── Decision cycle ────────────────────────────────────────────────
 
     async def _trading_cycle(self, session: str) -> None:
@@ -233,6 +277,9 @@ class Orchestrator(TradingAgent):
             or agent.name not in frozen
         }
 
+        # 2b. Infra agents observe the cycle → tighten-only directive.
+        directive = await self._run_infra_agents(contexts, portfolio, state)
+
         # 3. Per-ticker decisions. Sells (from any owned strategy) run first;
         #    buys are restricted to active agents and ranked by evidence.
         sell_sigs: list[StrategySignal] = []
@@ -241,7 +288,7 @@ class Orchestrator(TradingAgent):
             if await self._risk.in_cooldown(ticker):
                 continue
             decision = await self._decide_orchestrated(
-                ctx, weights, state, active_names
+                ctx, weights, state, active_names, directive
             )
             if decision is None:
                 continue
@@ -258,13 +305,17 @@ class Orchestrator(TradingAgent):
 
         if state.decision == "OFF":
             logger.info("macro_gate_off_skipping_buys", rationale=state.rationale)
-            await self._persist_state(state, portfolio, frozen, buys_skipped=True)
+            await self._persist_state(
+                state, portfolio, frozen, buys_skipped=True, directive=directive
+            )
             return
 
         portfolio = await self._execute_buys(
-            buy_candidates, weights, portfolio, extended, state
+            buy_candidates, weights, portfolio, extended, state, directive
         )
-        await self._persist_state(state, portfolio, frozen, buys_skipped=False)
+        await self._persist_state(
+            state, portfolio, frozen, buys_skipped=False, directive=directive
+        )
 
     async def _decide_orchestrated(
         self,
@@ -272,13 +323,16 @@ class Orchestrator(TradingAgent):
         weights: dict[str, float],
         state: MacroState,
         active_names: set[str],
+        directive: InfraDirective | None = None,
     ) -> tuple[str, StrategySignal, float] | None:
         """Agent-aware version of TradingAgent._decide.
 
         All non-HOLD signals are recorded for learning. SELLs on held positions
         may come from any strategy (so an inactive agent can still exit); BUYs
-        are restricted to strategies whose agent is active this regime.
+        are restricted to strategies whose agent is active this regime and are
+        further gated/scaled by the tighten-only infra directive.
         """
+        directive = directive or NO_TIGHTENING
         candidates: list[StrategySignal] = []
         for strategy in self._strategies:
             sig = strategy.evaluate(ctx)
@@ -305,17 +359,23 @@ class Orchestrator(TradingAgent):
             )
             return ("sell", best_sell, 0.0)
 
+        # Infra directive: block buys on flagged tickers (sells above still run).
+        if ctx.ticker in directive.blocked:
+            return None
+
         buys = [
             s for s in enabled if s.action == Action.BUY and s.strategy in active_names
         ]
         if not buys:
             return None
         best = max(buys, key=lambda s: s.confidence * weights.get(s.strategy, 0))
+        # Dampen by the macro confidence factor AND the infra per-ticker scale.
+        infra_scale = directive.scale_for(ctx.ticker)
         dampened = StrategySignal(
             strategy=best.strategy,
             ticker=best.ticker,
             action=best.action,
-            confidence=best.confidence * state.confidence_factor,
+            confidence=best.confidence * state.confidence_factor * infra_scale,
             reason=best.reason,
             price=best.price,
             volatility=best.volatility,
@@ -333,8 +393,10 @@ class Orchestrator(TradingAgent):
         portfolio,
         extended: bool,
         state: MacroState,
+        directive: InfraDirective | None = None,
     ):
         """Rank buys by evidence and execute under macro + agent + sector caps."""
+        directive = directive or NO_TIGHTENING
         buy_candidates.sort(
             key=lambda pair: pair[0].confidence * weights.get(pair[0].strategy, 0),
             reverse=True,
@@ -347,7 +409,7 @@ class Orchestrator(TradingAgent):
         for sig, weight_factor in buy_candidates:
             plan = self._risk.size_buy(
                 sig,
-                weight_factor * state.size_mult,
+                weight_factor * state.size_mult * directive.size_mult,
                 portfolio,
                 extended,
                 drawdown_factor,
@@ -429,8 +491,15 @@ class Orchestrator(TradingAgent):
     # ── State persistence (reporting + zero-downtime recovery) ────────
 
     async def _persist_state(
-        self, state: MacroState, portfolio, frozen: set[str], *, buys_skipped: bool
+        self,
+        state: MacroState,
+        portfolio,
+        frozen: set[str],
+        *,
+        buys_skipped: bool,
+        directive: InfraDirective | None = None,
     ) -> None:
+        directive = directive or NO_TIGHTENING
         snapshot = {
             "time": now_utc().isoformat(),
             "macro": state.to_dict(),
@@ -446,6 +515,8 @@ class Orchestrator(TradingAgent):
                 }
                 for a in self._agents
             ],
+            "infra_agents": directive.reports,
+            "infra_blocked": sorted(directive.blocked),
             "portfolio_value": portfolio.total_value,
         }
         try:

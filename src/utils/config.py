@@ -226,6 +226,25 @@ class Settings(BaseSettings):
     # sector is unknown.
     max_sector_exposure_pct: float = Field(default=0.40)
 
+    # ── Infrastructure agents (Phase 2A) ──────────────────────────────
+    # Non-strategy cycle observers (data-validation, sentiment, risk-overseer)
+    # that can only TIGHTEN the buy path (block/scale buys, shrink the budget).
+    # Fail-open; enabling them changes nothing unless they actually find a
+    # problem. The live agent is still gated by trading_enabled.
+    infra_agents_enabled: bool = Field(default=True)
+    # Cached sentiment at/below veto blocks a buy; at/below caution halves it.
+    sentiment_veto_score: float = Field(default=-0.5)
+    sentiment_scale_score: float = Field(default=-0.2)
+    # RiskOverseer (Phase 2A.5) — institutional factor/correlation caps.
+    # A new entry correlated above this to any current holding is blocked.
+    correlation_max: float = Field(default=0.70)
+    # Portfolio-weighted net beta vs SPY is capped here (confirmed target).
+    portfolio_beta_max: float = Field(default=1.20)
+    # Portfolio-wide single-sector cluster cap (tighter than the per-agent one).
+    sector_cluster_max: float = Field(default=0.30)
+    # Rolling lookback (trading days) for the correlation / beta estimates.
+    risk_corr_lookback_days: int = Field(default=60)
+
 
 @lru_cache
 def get_settings() -> Settings:
