@@ -263,6 +263,13 @@ class Settings(BaseSettings):
     drift_cusum_slack: float = Field(default=0.0)
     drift_min_samples: int = Field(default=20)
 
+    # ── Telegram cockpit (Phase 3) ────────────────────────────────────
+    # Routine, non-actionable events (no-trade cycles, minor weight shifts) are
+    # batched into a periodic digest instead of pinging instantly. Actionable
+    # events (fills, freezes, regime flips, quarantines, risk breaches) always
+    # push immediately.
+    digest_interval_minutes: int = Field(default=60)
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -17,10 +17,9 @@ import asyncio
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-import telegram
 from sqlalchemy import select
-from telegram.constants import ParseMode
 
+from src.agents.notifier import Notifier
 from src.agents.quant_engine import QuantEngine
 from src.database.cache import cache
 from src.database.models import TradeRecord
@@ -70,6 +69,7 @@ class TradingAgent:
         self._cycle_lock = asyncio.Lock()
         self._reconciled = False
         self._skip_tickers: set[str] = set()  # TICKER_NOT_FOUND for this session
+        self._notifier = Notifier()
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -623,14 +623,4 @@ class TradingAgent:
 
     async def _notify(self, text: str) -> None:
         """Send an HTML message to the admin chat (best-effort)."""
-        if not settings.telegram_token or not settings.telegram_chat_id:
-            return
-        try:
-            bot = telegram.Bot(settings.telegram_token)
-            await bot.send_message(
-                chat_id=settings.telegram_chat_id,
-                text=text,
-                parse_mode=ParseMode.HTML,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("trade_notify_failed", error=str(exc))
+        await self._notifier.send(text)
