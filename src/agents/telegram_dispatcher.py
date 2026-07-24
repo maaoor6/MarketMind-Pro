@@ -1130,6 +1130,61 @@ async def cmd_sync_positions(
     )
 
 
+async def cmd_flatten(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/flatten confirm — close ALL positions next cycle. Admin-only, guarded."""
+    from src.trading.manual_ops import request_flatten
+
+    msg_obj = update.message or (
+        update.callback_query.message if update.callback_query else None
+    )
+    if not msg_obj:
+        return
+    if not _is_admin(update):
+        await msg_obj.reply_text("🔒 This command is restricted to the bot admin.")
+        return
+    args = [a.lower() for a in (context.args or [])]
+    if "confirm" not in args:
+        await msg_obj.reply_text(
+            "⚠️ <b>Flatten ALL positions?</b>\n"
+            "This closes every open position on the next cycle. "
+            "Re-send <code>/flatten confirm</code> to proceed.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    await request_flatten()
+    await msg_obj.reply_text(
+        "🛑 <b>Flatten queued</b> — all positions will be closed on the next "
+        "cycle. You'll get a ✅ confirmation once the orchestrator applies it.",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def cmd_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/close TICKER — force a full exit of one position next cycle. Admin-only."""
+    from src.trading.manual_ops import request_close
+
+    msg_obj = update.message or (
+        update.callback_query.message if update.callback_query else None
+    )
+    if not msg_obj:
+        return
+    if not _is_admin(update):
+        await msg_obj.reply_text("🔒 This command is restricted to the bot admin.")
+        return
+    if not context.args:
+        await msg_obj.reply_text(
+            "Usage: <code>/close TICKER</code>", parse_mode=ParseMode.HTML
+        )
+        return
+    ticker = context.args[0].strip().upper()
+    await request_close(ticker)
+    await msg_obj.reply_text(
+        f"🔴 <b>Close {ticker} queued</b> — a full exit runs on the next cycle "
+        "(if the position is held). You'll get a ✅ confirmation once applied.",
+        parse_mode=ParseMode.HTML,
+    )
+
+
 # ── Backtest trigger (admin-only; the full report opens in the browser) ──
 _backtest_task: asyncio.Task | None = None
 _DEFAULT_ROTATION_SIZE = 8
@@ -2642,6 +2697,8 @@ def build_application() -> Application:
     app.add_handler(
         CommandHandler("sync_positions", cmd_sync_positions, filters=_auth_filter)
     )
+    app.add_handler(CommandHandler("flatten", cmd_flatten, filters=_auth_filter))
+    app.add_handler(CommandHandler("close", cmd_close, filters=_auth_filter))
     app.add_handler(CommandHandler("backtest", cmd_backtest, filters=_auth_filter))
     app.add_handler(
         CallbackQueryHandler(callback_handler)

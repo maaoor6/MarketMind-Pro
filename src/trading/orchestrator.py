@@ -41,6 +41,7 @@ from src.trading.infra_agents import (
     build_infra_agents,
 )
 from src.trading.macro_gate import MacroState, MacroTimingGate
+from src.trading.manual_ops import pop_pending, write_ack
 from src.trading.shadow import ShadowBook
 from src.trading.strategies import (
     SECTOR_ROTATION_ETFS,
@@ -207,6 +208,42 @@ class Orchestrator(TradingAgent):
                     until=until,
                 )
 
+    # ── Manual overrides (Telegram → forced exits) ────────────────────
+
+    async def _run_manual_ops(self, portfolio, extended: bool):
+        """Execute any queued /flatten or /close requests, then ack + notify."""
+        ops = await pop_pending()
+        if not ops.any():
+            return portfolio
+        if ops.flatten:
+            targets = list(portfolio.positions)
+        else:
+            targets = [t for t in ops.close if t in portfolio.positions]
+        sold: list[str] = []
+        for ticker in targets:
+            position = portfolio.positions.get(ticker)
+            if position is None:
+                continue
+            price = position.current_price or position.avg_price
+            sig = StrategySignal(
+                strategy="manual",
+                ticker=ticker,
+                action=Action.SELL,
+                confidence=1.0,
+                reason="manual override",
+                price=price,
+            )
+            plan = self._risk.validate_sell(sig, portfolio)
+            if plan is not None:
+                portfolio = await self._execute(plan, portfolio, extended) or portfolio
+                sold.append(ticker)
+        kind = "flatten" if ops.flatten else "close"
+        summary = f"manual {kind}: sold {sold or 'nothing (no matching positions)'}"
+        await write_ack(summary)
+        await self._notifier.push("reconcile", f"✅ {summary}")
+        logger.info("manual_ops_applied", kind=kind, sold=sold)
+        return portfolio
+
     # ── Infra agents (tighten-only observers) ─────────────────────────
 
     async def _ticker_returns(self, ticker: str) -> list[float] | None:
@@ -279,6 +316,10 @@ class Orchestrator(TradingAgent):
 
         portfolio = await self._client.get_portfolio()
         extended = session != "regular"
+
+        # Manual overrides (/flatten, /close) run before anything else and
+        # bypass anti-churn — the human is explicitly de-risking.
+        portfolio = await self._run_manual_ops(portfolio, extended)
 
         if await self._risk.circuit_breaker_tripped(portfolio):
             logger.warning("trading_halted_daily_circuit_breaker")
