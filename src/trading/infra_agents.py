@@ -15,10 +15,16 @@ lacks data contributes nothing.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from src.database.cache import cache
+from src.trading.risk_factors import beta as _beta
+from src.trading.risk_factors import (
+    max_correlation_to_held,
+    portfolio_beta,
+)
 from src.utils.config import settings
 from src.utils.logger import get_logger
 
@@ -192,6 +198,143 @@ def _extract_score(cached: Any) -> float | None:
     return None
 
 
-def build_infra_agents() -> list[InfraAgent]:
-    """Construct the enabled infra agents (order = evaluation order)."""
-    return [DataValidationAgent(), SentimentAgent()]
+class RiskOverseerAgent(InfraAgent):
+    """Institutional factor/correlation caps — all free, tighten-only.
+
+    Enforces three portfolio-level limits (blocks/scales new buys only):
+
+    * **Correlation** — blocks a candidate whose return correlation to any
+      current holding exceeds ``correlation_max`` (default 0.70).
+    * **Beta** — if the value-weighted portfolio beta vs SPY exceeds
+      ``portfolio_beta_max`` (default 1.20), shrinks the global buy budget.
+    * **Sector cluster** — blocks candidates in a sector already at/above
+      ``sector_cluster_max`` (default 0.30) of the book.
+
+    Returns/sector data are pulled via injected async callables so the agent is
+    pure-testable and never imports the data plane directly. Everything fails
+    open — missing data contributes no constraint.
+    """
+
+    name = "risk_overseer"
+
+    def __init__(
+        self,
+        fetch_returns: Callable[[str], Awaitable[list[float] | None]] | None = None,
+        sector_of: Callable[[str], Awaitable[str]] | None = None,
+        market_symbol: str = "SPY",
+    ) -> None:
+        self._fetch_returns = fetch_returns
+        self._sector_of = sector_of
+        self._market = market_symbol
+
+    async def observe(self, cycle: CycleContext) -> AgentReport:
+        report = AgentReport(agent=self.name)
+        portfolio = cycle.portfolio
+        if portfolio is None:
+            return report
+        positions = getattr(portfolio, "positions", {}) or {}
+        held = set(positions)
+        candidates = [t for t in cycle.contexts if t not in held]
+
+        if self._fetch_returns is not None and held:
+            try:
+                await self._correlation_and_beta(report, positions, held, candidates)
+            except Exception as exc:  # noqa: BLE001 — fail open
+                logger.debug("risk_overseer_factor_failed", error=type(exc).__name__)
+
+        if self._sector_of is not None and candidates:
+            try:
+                await self._sector_cluster(report, portfolio, candidates)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("risk_overseer_sector_failed", error=type(exc).__name__)
+
+        if report.block_buys or report.size_mult < 1.0:
+            report.ok = False
+        return report
+
+    async def _correlation_and_beta(
+        self, report: AgentReport, positions, held: set[str], candidates: list[str]
+    ) -> None:
+        market_rets = await self._fetch_returns(self._market)
+        held_rets: dict[str, list[float]] = {}
+        for ticker in held:
+            rets = await self._fetch_returns(ticker)
+            if rets:
+                held_rets[ticker] = rets
+
+        # Portfolio beta → shrink budget if over the cap.
+        if market_rets:
+            betas: dict[str, float] = {}
+            weights: dict[str, float] = {}
+            for ticker, pos in positions.items():
+                b = _beta(held_rets.get(ticker, []), market_rets)
+                if b is not None:
+                    betas[ticker] = b
+                value = getattr(pos, "market_value", None) or (
+                    getattr(pos, "quantity", 0)
+                    * (
+                        getattr(pos, "current_price", None)
+                        or getattr(pos, "avg_price", 0)
+                    )
+                )
+                weights[ticker] = float(value or 0.0)
+            pbeta = portfolio_beta(weights, betas)
+            if pbeta > settings.portfolio_beta_max > 0:
+                report.size_mult = min(
+                    report.size_mult, settings.portfolio_beta_max / pbeta
+                )
+                report.notes.append(
+                    f"portfolio beta {pbeta:.2f} > {settings.portfolio_beta_max}"
+                )
+                report.detail["portfolio_beta"] = round(pbeta, 3)
+
+        # Correlation → block over-correlated candidates.
+        if held_rets:
+            for ticker in candidates:
+                rets = await self._fetch_returns(ticker)
+                if not rets:
+                    continue
+                mc = max_correlation_to_held(rets, held_rets)
+                if mc is not None and mc > settings.correlation_max:
+                    report.block_buys.add(ticker)
+                    report.notes.append(f"{ticker}: corr {mc:.2f} to a holding")
+
+    async def _sector_cluster(
+        self, report: AgentReport, portfolio, candidates: list[str]
+    ) -> None:
+        total = max(getattr(portfolio, "total_value", 0.0) or 0.0, 1.0)
+        expo: dict[str, float] = {}
+        for ticker, pos in (getattr(portfolio, "positions", {}) or {}).items():
+            value = getattr(pos, "market_value", None) or (
+                getattr(pos, "quantity", 0)
+                * (getattr(pos, "current_price", None) or getattr(pos, "avg_price", 0))
+            )
+            sector = await self._sector_of(ticker)
+            if sector and sector != "UNKNOWN":
+                expo[sector] = expo.get(sector, 0.0) + float(value or 0.0) / total
+        over = {s for s, e in expo.items() if e >= settings.sector_cluster_max}
+        if not over:
+            return
+        for ticker in candidates:
+            sector = await self._sector_of(ticker)
+            if sector in over:
+                report.block_buys.add(ticker)
+                report.notes.append(f"{ticker}: sector {sector} cluster full")
+
+
+def build_infra_agents(
+    risk_returns_fn: Callable[[str], Awaitable[list[float] | None]] | None = None,
+    sector_of: Callable[[str], Awaitable[str]] | None = None,
+) -> list[InfraAgent]:
+    """Construct the enabled infra agents (order = evaluation order).
+
+    The RiskOverseer is included only when the Orchestrator supplies the
+    returns + sector callables (it needs the live data plane); the pure
+    DataValidation + Sentiment agents are always present.
+    """
+    agents: list[InfraAgent] = [DataValidationAgent(), SentimentAgent()]
+    if risk_returns_fn is not None or sector_of is not None:
+        agents.append(
+            RiskOverseerAgent(fetch_returns=risk_returns_fn, sector_of=sector_of)
+        )
+    return agents

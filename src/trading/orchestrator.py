@@ -79,8 +79,13 @@ class Orchestrator(TradingAgent):
         self._exec_tracker = ExecutionTracker()
         self._sector_cache: dict[str, str] = {}
         # Infra agents (tighten-only cycle observers). Empty when disabled.
+        # RiskOverseer gets the live returns + sector callables.
         self._infra_agents = (
-            build_infra_agents() if settings.infra_agents_enabled else []
+            build_infra_agents(
+                risk_returns_fn=self._ticker_returns, sector_of=self._sector_of
+            )
+            if settings.infra_agents_enabled
+            else []
         )
 
     async def _record_trade(self, plan, result) -> None:
@@ -199,6 +204,31 @@ class Orchestrator(TradingAgent):
                 )
 
     # ── Infra agents (tighten-only observers) ─────────────────────────
+
+    async def _ticker_returns(self, ticker: str) -> list[float] | None:
+        """Daily returns over the correlation lookback for the RiskOverseer.
+
+        Fail-open: any fetch error → None (the agent then adds no constraint
+        for this ticker). Uses the same provider-backed price plane as the rest
+        of the cycle.
+        """
+        if self._quant is None:
+            return None
+        try:
+            lookback = settings.risk_corr_lookback_days
+            period = "6mo" if lookback <= 126 else "1y"
+            df = await self._quant.fetch_price_data(
+                ticker, period=period, interval="1d"
+            )
+            closes = [float(c) for c in df["Close"].tail(lookback + 1).tolist()]
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "ticker_returns_failed", ticker=ticker, error=type(exc).__name__
+            )
+            return None
+        from src.trading.risk_factors import daily_returns
+
+        return daily_returns(closes) or None
 
     async def _run_infra_agents(
         self, contexts: dict[str, StrategyContext], portfolio, state: MacroState
