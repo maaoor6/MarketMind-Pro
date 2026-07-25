@@ -22,6 +22,11 @@ async def run() -> None:
     # Connect cache
     await cache.connect()
 
+    # Boot readiness self-check (logs a redacted report; never hard-fails).
+    from src.utils.preflight import run_preflight
+
+    await run_preflight()
+
     quant = QuantEngine()
     telegram = TelegramDispatcher()
     trading = Orchestrator(quant)
