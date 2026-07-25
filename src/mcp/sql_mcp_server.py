@@ -5,7 +5,7 @@ import sys
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 
 from src.database.models import DualListingGap, PriceHistory, SentimentRecord, UserAlert
 from src.database.session import AsyncSessionLocal
+from src.mcp.auth import require_mcp_auth
 from src.utils.config import settings
 from src.utils.logger import get_logger
 
@@ -32,31 +33,31 @@ async def health() -> dict:
     return {"status": "ok", "detail": "SQL MCP server running"}
 
 
-@http_app.post("/tools/query_prices")
+@http_app.post("/tools/query_prices", dependencies=[Depends(require_mcp_auth)])
 async def query_prices_endpoint(body: dict) -> JSONResponse:
     results = await _query_prices(**body)
     return JSONResponse(content=json.loads(results[0].text))
 
 
-@http_app.post("/tools/get_arbitrage_history")
+@http_app.post("/tools/get_arbitrage_history", dependencies=[Depends(require_mcp_auth)])
 async def get_arbitrage_history_endpoint(body: dict) -> JSONResponse:
     results = await _get_arbitrage_history(**body)
     return JSONResponse(content=json.loads(results[0].text))
 
 
-@http_app.post("/tools/get_alerts")
+@http_app.post("/tools/get_alerts", dependencies=[Depends(require_mcp_auth)])
 async def get_alerts_endpoint(body: dict) -> JSONResponse:
     results = await _get_alerts(**body)
     return JSONResponse(content=json.loads(results[0].text))
 
 
-@http_app.post("/tools/get_sentiment_history")
+@http_app.post("/tools/get_sentiment_history", dependencies=[Depends(require_mcp_auth)])
 async def get_sentiment_history_endpoint(body: dict) -> JSONResponse:
     results = await _get_sentiment_history(**body)
     return JSONResponse(content=json.loads(results[0].text))
 
 
-@http_app.post("/tools/get_volume_spikes")
+@http_app.post("/tools/get_volume_spikes", dependencies=[Depends(require_mcp_auth)])
 async def get_volume_spikes_endpoint(body: dict) -> JSONResponse:
     results = await _get_volume_spikes(**body)
     return JSONResponse(content=json.loads(results[0].text))
@@ -163,8 +164,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 )
             ]
     except Exception as exc:
-        logger.error("sql_mcp_tool_failed", tool=name, error=str(exc))
-        return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
+        # Log the type only and return a generic error — never echo exception
+        # strings to the caller (they can carry connection/query internals).
+        logger.error("sql_mcp_tool_failed", tool=name, error=type(exc).__name__)
+        return [TextContent(type="text", text=json.dumps({"error": "tool_failed"}))]
 
 
 # ── Tool implementations ──────────────────────────────────────────────────────
@@ -248,10 +251,20 @@ async def _get_alerts(
     chat_id: str | None = None,
     ticker: str | None = None,
 ) -> list[TextContent]:
+    # Scoped: a caller must identify the chat_id — never enumerate every user's
+    # alerts (and their chat_ids) across the whole table.
+    if not chat_id:
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps({"error": "chat_id is required"}),
+            )
+        ]
     async with AsyncSessionLocal() as session:
-        stmt = select(UserAlert).where(UserAlert.is_active == True)  # noqa: E712
-        if chat_id:
-            stmt = stmt.where(UserAlert.chat_id == chat_id)
+        stmt = select(UserAlert).where(
+            UserAlert.is_active == True,  # noqa: E712
+            UserAlert.chat_id == chat_id,
+        )
         if ticker:
             stmt = stmt.where(UserAlert.ticker == ticker.upper())
 

@@ -107,6 +107,9 @@ class Settings(BaseSettings):
     # Google Search MCP
     google_search_mcp_port: int = Field(default=8001)
     sql_mcp_port: int = Field(default=8002)
+    # Shared bearer for the MCP HTTP endpoints (X-MCP-Token header). Empty =
+    # auth disabled (local dev only; a startup warning is logged).
+    mcp_auth_token: str = Field(default="")
     google_api_key: str = Field(default="")
     google_search_engine_id: str = Field(default="")
 
