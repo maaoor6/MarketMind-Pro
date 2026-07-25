@@ -1,0 +1,21 @@
+# Gitleaks configuration for MarketMind-Pro.
+# Extends the built-in rules; allowlists the placeholder values in .env.example
+# and docs so scans don't flag intentional examples.
+title = "MarketMind-Pro gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Placeholders and non-secret example values"
+paths = [
+  '''\.env\.example''',
+  '''README\.md''',
+  '''CLAUDE\.md''',
+]
+regexes = [
+  '''your_[a-z_]+''',            # .env.example placeholders (your_bot_token…)
+  '''test_token''',              # CI dummy secrets
+  '''marketmind:password@''',    # default local DB creds in config defaults
+  '''marketmind:test@''',        # CI DB creds
+]

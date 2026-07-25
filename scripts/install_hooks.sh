@@ -47,7 +47,20 @@ else
     exit 1
 fi
 
-# ── 4. Unit Tests ─────────────────────────────────────────────────────
+# ── 4. Gitleaks Secret Scan (optional — only if installed) ────────────
+echo -n "  Running Gitleaks... "
+if command -v gitleaks >/dev/null 2>&1; then
+    if gitleaks protect --staged --config .gitleaks.toml --no-banner >/dev/null 2>&1; then
+        echo -e "${GREEN}✓ PASSED${NC}"
+    else
+        echo -e "${RED}✗ FAILED — a staged change looks like a secret${NC}"
+        exit 1
+    fi
+else
+    echo -e "${YELLOW}skipped (install: brew install gitleaks)${NC}"
+fi
+
+# ── 5. Unit Tests ─────────────────────────────────────────────────────
 echo -n "  Running unit tests... "
 if python -m pytest tests/unit/ -x -q --tb=line 2>/dev/null; then
     echo -e "${GREEN}✓ PASSED${NC}"

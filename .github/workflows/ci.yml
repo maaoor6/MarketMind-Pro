@@ -50,6 +50,33 @@ jobs:
           file: coverage.xml
           fail_ci_if_error: false
 
+  security-scan:
+    name: Secret & Dependency Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history so gitleaks can scan all commits
+
+      - name: Gitleaks secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_CONFIG: .gitleaks.toml
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: pip-audit dependency CVE scan
+        run: |
+          pip install --upgrade pip pip-audit
+          # Report vulnerabilities but don't fail the build on advisories with
+          # no fix available yet; tighten once the lockfile lands.
+          pip-audit -r requirements.txt --strict || true
+
   integration-test:
     name: Integration Tests
     runs-on: ubuntu-latest
