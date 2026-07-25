@@ -273,6 +273,15 @@ class Settings(BaseSettings):
     # push immediately.
     digest_interval_minutes: int = Field(default=60)
 
+    # ── Infrastructure watchdog (Phase 5.3a) ──────────────────────────
+    # Supervisory task that watches process RAM/CPU + Redis health and alerts
+    # (and sets a system:degraded flag) before an OOM / Signal-9 kill. Uses
+    # psutil when available, else stdlib /proc fallbacks; no-ops if neither.
+    watchdog_enabled: bool = Field(default=True)
+    watchdog_mem_pct_max: float = Field(default=90.0)
+    watchdog_cpu_pct_max: float = Field(default=95.0)
+    watchdog_check_seconds: int = Field(default=30)
+
 
 @lru_cache
 def get_settings() -> Settings:
