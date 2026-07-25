@@ -6,6 +6,7 @@ import sys
 import structlog
 
 from src.utils.config import settings
+from src.utils.redact import redact_processor
 
 
 def configure_logging() -> None:
@@ -18,6 +19,8 @@ def configure_logging() -> None:
         structlog.processors.StackInfoRenderer(),
         structlog.dev.set_exc_info,
         structlog.processors.TimeStamper(fmt="ISO"),
+        # Scrub secrets from every event before it reaches a renderer/sink.
+        redact_processor,
     ]
 
     if settings.app_env == "production":
