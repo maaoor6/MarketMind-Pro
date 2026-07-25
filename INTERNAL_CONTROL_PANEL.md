@@ -212,6 +212,30 @@
 
 ---
 
+#### `/flatten confirm`
+
+| Field | Details |
+|-------|---------|
+| **Command** | `/flatten confirm` |
+| **Responsibility** | Close **all** open positions on the next cycle — **admin only** |
+| **How it works** | Guarded: without the literal `confirm` arg it only replies asking for confirmation. With it, sets Redis `trading:manual:flatten=on`; `Orchestrator._run_manual_ops` drains it at the top of the next cycle and force-exits every position via `RiskManager.validate_sell` (bypasses anti-churn), then writes `trading:manual:ack` and pushes a ✅ confirmation. |
+| **Access & Flags** | Restricted to `TELEGRAM_CHAT_ID` |
+| **Success Check** | A ✅ "manual flatten: sold [...]" push arrives; Orchestrator logs `manual_ops_applied` |
+
+---
+
+#### `/close TICKER`
+
+| Field | Details |
+|-------|---------|
+| **Command** | `/close TICKER` |
+| **Responsibility** | Force a full exit of one held position on the next cycle — **admin only** |
+| **How it works** | Appends the ticker to Redis `trading:manual:close`; the Orchestrator force-exits it next cycle (if held), writes an ack, and pushes a ✅ confirmation. |
+| **Access & Flags** | Restricted to `TELEGRAM_CHAT_ID` |
+| **Success Check** | A ✅ "manual close: sold [...]" push arrives |
+
+---
+
 #### `/backtest [TICKERS...]`
 
 | Field | Details |

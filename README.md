@@ -213,6 +213,8 @@ exist today (survivorship bias), so absolute returns skew slightly optimistic.
 | `/force_macro_off on\|off\|status` | Manual macro buy-halt override + current macro-gate regime/decision — **admin only** |
 | `/pause_agent <name>` · `/resume_agent <name>` | Freeze/unfreeze one thematic agent (Core Momentum, Defensive, …) — **admin only** |
 | `/sync_positions` | Force a StockArena reconciliation on the next cycle — **admin only** |
+| `/flatten confirm` | Close **all** positions on the next cycle (guarded — requires `confirm`); a confirmation is pushed once applied — **admin only** |
+| `/close TICKER` | Force a full exit of one position on the next cycle; confirmation pushed once applied — **admin only** |
 | `/backtest [TICKERS...]` | Run the offline strategy backtest in the background; replies with the winning strategy + local Hebrew report path, with a one-tap button to adopt the learned weights — **admin only** |
 | `/health` | System dashboard: DB, Redis, MCP servers, news RSS, quant engine + trading bot status — **admin only** |
 
