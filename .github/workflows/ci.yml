@@ -50,6 +50,40 @@ jobs:
           file: coverage.xml
           fail_ci_if_error: false
 
+  security-scan:
+    name: Secret & Dependency Scan
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: write  # gitleaks comments findings on the PR
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history so gitleaks can scan all commits
+
+      - name: Gitleaks secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          # Required since gitleaks-action v2's breaking change: PR scans fail
+          # without it. Uses the auto-provisioned per-run token, not a PAT.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: pip-audit dependency CVE scan
+        run: |
+          pip install --upgrade pip pip-audit
+          # Report vulnerabilities but don't fail the build on advisories with
+          # no fix available yet; tighten once the lockfile lands.
+          pip-audit -r requirements.txt --strict || true
+
   integration-test:
     name: Integration Tests
     runs-on: ubuntu-latest

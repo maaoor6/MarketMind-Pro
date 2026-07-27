@@ -10,6 +10,7 @@ import pandas as pd
 import yfinance as yf
 from sqlalchemy import select
 
+from src.data import get_provider
 from src.database.cache import cache
 from src.database.models import InsiderTransaction
 from src.database.session import AsyncSessionLocal
@@ -129,8 +130,10 @@ async def fetch_company_profile(ticker: str) -> CompanyProfile:
         logger.debug("fundamentals_cache_hit", ticker=ticker)
         return CompanyProfile(**cached)
 
-    loop = asyncio.get_event_loop()
-    info: dict = await loop.run_in_executor(None, lambda: yf.Ticker(ticker).info)
+    # Fetch the rich profile dict via the provider abstraction. Under the
+    # default priority (yfinance) this is identical to the previous direct
+    # yf.Ticker().info call; EDGAR is available as a cross-check/fallback.
+    info: dict = await get_provider().fetch_fundamentals(ticker)
 
     if not info or (
         info.get("regularMarketPrice") is None

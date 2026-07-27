@@ -58,8 +58,13 @@ async def get_usd_ils_rate() -> float:
             rate = float(data["conversion_rate"])
             logger.info("usd_ils_rate_fetched", rate=rate)
             return rate
-        except Exception as exc:
-            logger.error("usd_ils_rate_fetch_failed", error=str(exc))
+        except httpx.HTTPStatusError as exc:
+            # The API key sits in the URL path; str(exc) would leak it. Log the
+            # status code only.
+            logger.error("usd_ils_rate_fetch_failed", status=exc.response.status_code)
+            return 3.72
+        except Exception as exc:  # noqa: BLE001
+            logger.error("usd_ils_rate_fetch_failed", error=type(exc).__name__)
             return 3.72
 
 

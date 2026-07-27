@@ -4,10 +4,13 @@ import asyncio
 import signal
 import sys
 
+from src.agents.notifier import Notifier
 from src.agents.quant_engine import QuantEngine
 from src.agents.telegram_dispatcher import TelegramDispatcher
 from src.database.cache import cache
+from src.trading.orchestrator import Orchestrator
 from src.utils.logger import get_logger
+from src.utils.watchdog import Watchdog
 
 logger = get_logger(__name__)
 
@@ -19,8 +22,15 @@ async def run() -> None:
     # Connect cache
     await cache.connect()
 
+    # Boot readiness self-check (logs a redacted report; never hard-fails).
+    from src.utils.preflight import run_preflight
+
+    await run_preflight()
+
     quant = QuantEngine()
     telegram = TelegramDispatcher()
+    trading = Orchestrator(quant)
+    watchdog = Watchdog(notifier=Notifier())
 
     # Graceful shutdown handler
     shutdown_event = asyncio.Event()
@@ -38,6 +48,8 @@ async def run() -> None:
 
         tasks = [
             asyncio.create_task(quant.run_loop(), name="quant-engine"),
+            asyncio.create_task(trading.run_loop(), name="orchestrator"),
+            asyncio.create_task(watchdog.run(), name="watchdog"),
             asyncio.create_task(shutdown_event.wait(), name="shutdown-watcher"),
         ]
 
@@ -49,6 +61,9 @@ async def run() -> None:
 
     finally:
         quant.stop()
+        trading.stop()
+        watchdog.stop()
+        await trading.close()
         await telegram.stop()
         await cache.disconnect()
         logger.info("marketmind_pro_shutdown_complete")

@@ -22,6 +22,9 @@ aiohttp==3.11.18
 # ── Telegram ─────────────────────────────────────────────────────────
 python-telegram-bot[job-queue]==22.7
 
+# ── Backtesting ──────────────────────────────────────────────────────
+pyarrow==23.0.1
+
 # ── Charts & Visualization ───────────────────────────────────────────
 plotly==6.6.0
 kaleido==0.2.1
@@ -54,3 +57,9 @@ pytz==2025.2
 # ── Logging ──────────────────────────────────────────────────────────
 structlog==25.2.0
 defusedxml>=0.7.1
+
+# ── Macro-timing gate: local sentiment (zero paid-API cost) ──────────
+# VADER is tiny/pure-Python and always available. FinBERT (transformers +
+# torch) is an OPTIONAL upgrade the gate uses only if installed — kept out of
+# the base image to avoid its ~GB weight; install manually to enable it.
+vaderSentiment==3.3.2

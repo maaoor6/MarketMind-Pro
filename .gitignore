@@ -24,6 +24,11 @@ dist/
 build/
 .eggs/
 
+# ── Backtesting (local data & reports — never committed) ─────────────
+reports/
+data/cache/backtest/
+data/backtest.pid
+
 # ── Testing & Coverage ───────────────────────────────────────────────
 .pytest_cache/
 .coverage

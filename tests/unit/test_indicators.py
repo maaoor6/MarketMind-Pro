@@ -6,6 +6,7 @@ import pytest
 from src.quant.indicators import (
     MomentumScore,
     all_moving_averages,
+    bollinger,
     ema,
     generate_signals,
     macd,
@@ -370,3 +371,184 @@ def test_momentum_score_from_generate_signals():
     result = momentum_score(sigs, prices)
     assert isinstance(result, MomentumScore)
     assert 0 <= result.score <= 100
+
+
+# ── Bollinger Bands ────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_bollinger_bands_flat_prices_collapse(flat_prices):
+    bb = bollinger(flat_prices)
+    assert bb.middle.iloc[-1] == pytest.approx(100.0)
+    assert bb.upper.iloc[-1] == pytest.approx(100.0)
+    assert bb.lower.iloc[-1] == pytest.approx(100.0)
+
+
+@pytest.mark.unit
+def test_bollinger_bands_symmetric_around_middle():
+    rng = np.random.default_rng(3)
+    prices = pd.Series(100 + np.cumsum(rng.normal(0, 1, 60)))
+    bb = bollinger(prices)
+    spread_up = bb.upper.iloc[-1] - bb.middle.iloc[-1]
+    spread_down = bb.middle.iloc[-1] - bb.lower.iloc[-1]
+    assert spread_up == pytest.approx(spread_down)
+    assert spread_up > 0
+    # Middle band is the 20-period SMA.
+    assert bb.middle.iloc[-1] == pytest.approx(sma(prices, 20).iloc[-1])
+
+
+@pytest.mark.unit
+def test_bollinger_invalid_period():
+    with pytest.raises(ValueError):
+        bollinger(pd.Series([1.0, 2.0]), period=0)
+
+
+# ── generate_signals: new strategy fields ──────────────────────────────
+
+
+@pytest.fixture
+def long_series() -> tuple[pd.Series, pd.Series]:
+    rng = np.random.default_rng(11)
+    prices = pd.Series(100 * np.exp(np.cumsum(rng.normal(0.0005, 0.01, 300))))
+    volume = pd.Series(rng.integers(1_000_000, 5_000_000, 300).astype(float))
+    return prices, volume
+
+
+@pytest.mark.unit
+def test_generate_signals_new_fields_present(long_series):
+    prices, volume = long_series
+    signals = generate_signals(prices, volume)
+    assert 0.0 <= signals["rsi_2"] <= 100.0
+    assert signals["sma_5"] == pytest.approx(float(prices.tail(5).mean()))
+    assert signals["bb_lower"] < signals["bb_middle"] < signals["bb_upper"]
+    # Donchian windows end at the PREVIOUS bar.
+    assert signals["donchian_high_20"] == pytest.approx(
+        float(prices.iloc[:-1].tail(20).max())
+    )
+    assert signals["donchian_low_10"] == pytest.approx(
+        float(prices.iloc[:-1].tail(10).min())
+    )
+    # Trailing returns over 21 / 126 / 252 bars.
+    for name, window in (("ret_1m", 21), ("ret_6m", 126), ("ret_12m", 252)):
+        base = float(prices.iloc[-window - 1])
+        expected = (float(prices.iloc[-1]) - base) / base
+        assert signals[name] == pytest.approx(expected), name
+
+
+@pytest.mark.unit
+def test_generate_signals_new_fields_none_on_short_history(simple_prices):
+    volume = pd.Series([1_000_000.0] * len(simple_prices))
+    signals = generate_signals(simple_prices, volume)
+    assert signals["bb_lower"] is None  # needs 20 bars
+    assert signals["donchian_high_20"] is None
+    assert signals["ret_1m"] is None
+    assert signals["ret_6m"] is None
+    assert signals["ret_12m"] is None
+
+
+# ── ATR / ADX / Supertrend ─────────────────────────────────────────────
+
+
+@pytest.fixture
+def ohlc_series() -> tuple[pd.Series, pd.Series, pd.Series]:
+    rng = np.random.default_rng(5)
+    close = pd.Series(100 * np.exp(np.cumsum(rng.normal(0.0004, 0.012, 300))))
+    high = close * (1 + rng.uniform(0, 0.01, len(close)))
+    low = close * (1 - rng.uniform(0, 0.01, len(close)))
+    return high, low, close
+
+
+@pytest.mark.unit
+def test_atr_positive_and_bounded(ohlc_series):
+    from src.quant.indicators import atr
+
+    high, low, close = ohlc_series
+    a = atr(high, low, close, period=14)
+    last = a.dropna()
+    assert (last > 0).all()
+    # ATR must not exceed the largest single-bar range in the window ballpark.
+    assert last.iloc[-1] < float((high - low).max()) * 3
+
+
+@pytest.mark.unit
+def test_atr_warmup_is_nan(ohlc_series):
+    from src.quant.indicators import atr
+
+    high, low, close = ohlc_series
+    a = atr(high, low, close, period=14)
+    assert a.iloc[:13].isna().all()
+    assert not np.isnan(a.iloc[14])
+
+
+@pytest.mark.unit
+def test_atr_invalid_period(ohlc_series):
+    from src.quant.indicators import atr
+
+    high, low, close = ohlc_series
+    with pytest.raises(ValueError):
+        atr(high, low, close, period=0)
+
+
+@pytest.mark.unit
+def test_adx_components_in_range(ohlc_series):
+    from src.quant.indicators import adx
+
+    high, low, close = ohlc_series
+    res = adx(high, low, close, period=14)
+    a = res.adx.dropna()
+    assert (a >= 0).all() and (a <= 100).all()
+    assert (res.plus_di.dropna() >= 0).all()
+    assert (res.minus_di.dropna() >= 0).all()
+
+
+@pytest.mark.unit
+def test_adx_high_in_persistent_uptrend():
+    from src.quant.indicators import adx
+
+    # A clean monotonic uptrend should produce +DI > −DI.
+    close = pd.Series(np.linspace(10, 60, 120))
+    high = close * 1.01
+    low = close * 0.99
+    res = adx(high, low, close, period=14)
+    assert res.plus_di.iloc[-1] > res.minus_di.iloc[-1]
+
+
+@pytest.mark.unit
+def test_supertrend_direction_values(ohlc_series):
+    from src.quant.indicators import supertrend
+
+    high, low, close = ohlc_series
+    d = supertrend(high, low, close).dropna()
+    assert set(d.unique()) <= {1.0, -1.0}
+
+
+@pytest.mark.unit
+def test_supertrend_uptrend_is_positive():
+    from src.quant.indicators import supertrend
+
+    close = pd.Series(np.linspace(10, 60, 120))
+    high = close * 1.01
+    low = close * 0.99
+    d = supertrend(high, low, close)
+    assert d.iloc[-1] == 1.0
+
+
+@pytest.mark.unit
+def test_generate_signals_atr_fields_none_without_highlow(long_series):
+    prices, volume = long_series
+    signals = generate_signals(prices, volume)
+    for key in ("atr_14", "adx_14", "supertrend_dir", "keltner_upper"):
+        assert signals[key] is None
+
+
+@pytest.mark.unit
+def test_generate_signals_atr_fields_present_with_highlow(long_series):
+    prices, volume = long_series
+    high = prices * 1.01
+    low = prices * 0.99
+    signals = generate_signals(prices, volume, high=high, low=low)
+    assert signals["atr_14"] > 0
+    assert 0 <= signals["adx_14"] <= 100
+    assert signals["supertrend_dir"] in (1.0, -1.0)
+    assert signals["keltner_upper"] > signals["keltner_lower"]
+    assert signals["atr_pct"] == pytest.approx(signals["atr_14"] / signals["price"])

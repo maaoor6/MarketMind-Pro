@@ -6,6 +6,7 @@ import sys
 import structlog
 
 from src.utils.config import settings
+from src.utils.redact import redact_processor
 
 
 def configure_logging() -> None:
@@ -18,6 +19,8 @@ def configure_logging() -> None:
         structlog.processors.StackInfoRenderer(),
         structlog.dev.set_exc_info,
         structlog.processors.TimeStamper(fmt="ISO"),
+        # Scrub secrets from every event before it reaches a renderer/sink.
+        redact_processor,
     ]
 
     if settings.app_env == "production":
@@ -48,6 +51,13 @@ def configure_logging() -> None:
         stream=sys.stdout,
         level=log_level,
     )
+
+    # httpx/httpcore log every request line at INFO ("HTTP Request: GET <url>").
+    # That URL can carry a secret in its query/path (Google ?key=, FRED
+    # ?api_key=, ExchangeRate /v6/<key>/), so raise their level to WARNING to
+    # keep API keys out of the logs.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 def get_logger(name: str) -> structlog.BoundLogger:

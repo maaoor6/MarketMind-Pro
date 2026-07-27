@@ -5,12 +5,13 @@ from typing import Any
 
 import httpx
 import uvicorn
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+from src.mcp.auth import host_allowed, require_mcp_auth
 from src.utils.config import settings
 from src.utils.logger import get_logger
 
@@ -45,7 +46,7 @@ async def health() -> dict:
     }
 
 
-@http_app.post("/tools/search_web")
+@http_app.post("/tools/search_web", dependencies=[Depends(require_mcp_auth)])
 async def search_web_endpoint(body: dict) -> JSONResponse:
     """Search the web for financial news."""
     results = await _search_web(
@@ -57,7 +58,7 @@ async def search_web_endpoint(body: dict) -> JSONResponse:
     return JSONResponse(content=data)
 
 
-@http_app.post("/tools/scrape_page")
+@http_app.post("/tools/scrape_page", dependencies=[Depends(require_mcp_auth)])
 async def scrape_page_endpoint(body: dict) -> JSONResponse:
     """Scrape a financial news article."""
     results = await _scrape_page(url=body.get("url", ""))
@@ -65,7 +66,7 @@ async def scrape_page_endpoint(body: dict) -> JSONResponse:
     return JSONResponse(content=data)
 
 
-@http_app.post("/tools/search_financial_news")
+@http_app.post("/tools/search_financial_news", dependencies=[Depends(require_mcp_auth)])
 async def search_financial_news_endpoint(body: dict) -> JSONResponse:
     """Search for financial news about a ticker."""
     results = await _search_financial_news(
@@ -224,16 +225,27 @@ async def _search_web(
                     text=json.dumps({"results": results, "query": full_query}),
                 )
             ]
-        except Exception as exc:
-            logger.error("google_search_mcp_failed", error=str(exc))
-            return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
+        except httpx.HTTPStatusError as exc:
+            # str(exc) / the response body embed the request URL incl. ?key=...;
+            # never surface either in the log or the tool response.
+            logger.error("google_search_mcp_failed", status=exc.response.status_code)
+            return [
+                TextContent(type="text", text=json.dumps({"error": "search_failed"}))
+            ]
+        except Exception as exc:  # noqa: BLE001
+            logger.error("google_search_mcp_failed", error=type(exc).__name__)
+            return [
+                TextContent(type="text", text=json.dumps({"error": "search_failed"}))
+            ]
 
 
 async def _scrape_page(url: str) -> list[TextContent]:
     """Fetch page content from a URL."""
     allowed_domains = set(FINANCIAL_SITES) | {"sec.gov", "tase.co.il"}
-    domain = url.split("/")[2] if url.count("/") >= 2 else ""
-    if not any(allowed in domain for allowed in allowed_domains):
+    # Strict host match (exact domain or proper subdomain) — closes the
+    # substring bypass where "cnbc.com.evil.com" passed the old check.
+    ok, domain = host_allowed(url, allowed_domains)
+    if not ok:
         return [
             TextContent(
                 type="text",
@@ -251,7 +263,11 @@ async def _scrape_page(url: str) -> list[TextContent]:
                 TextContent(type="text", text=json.dumps({"url": url, "content": text}))
             ]
         except Exception as exc:
-            return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
+            # Never echo the exception string — it embeds the request URL.
+            logger.debug("scrape_failed", error=type(exc).__name__)
+            return [
+                TextContent(type="text", text=json.dumps({"error": "scrape_failed"}))
+            ]
 
 
 async def _search_financial_news(
