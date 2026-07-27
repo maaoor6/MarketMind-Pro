@@ -2,7 +2,17 @@
 # ══════════════════════════════════════════════════════════════════════
 #  MarketMind-Pro — Docker Compose
 #  Target: Apple Silicon M4 (arm64) — all images use linux/arm64
+#
+#  Published ports bind to 127.0.0.1 only — services talk to each other
+#  over marketmind_net by service name, so nothing needs LAN exposure.
+#  Logs rotate (10 MB × 3) so a long unattended run cannot fill the disk.
 # ══════════════════════════════════════════════════════════════════════
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
 
 services:
 
@@ -18,7 +28,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-marketmind_dev_password}
       PGDATA: /var/lib/postgresql/data/pgdata
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
+    logging: *default-logging
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -39,7 +50,8 @@ services:
     restart: unless-stopped
     command: redis-server --save 60 1 --loglevel warning --maxmemory 256mb --maxmemory-policy allkeys-lru
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
+    logging: *default-logging
     volumes:
       - redis_data:/data
     healthcheck:
@@ -74,6 +86,7 @@ services:
         condition: service_healthy
     volumes:
       - app_data:/app/data
+    logging: *default-logging
     networks:
       - marketmind_net
     healthcheck:
@@ -99,7 +112,8 @@ services:
       PYTHONPATH: /app
     command: ["python", "-m", "src.mcp.google_search_mcp"]
     ports:
-      - "8001:8001"
+      - "127.0.0.1:8001:8001"
+    logging: *default-logging
     depends_on:
       - postgres
       - redis
@@ -121,7 +135,8 @@ services:
       PYTHONPATH: /app
     command: ["python", "-m", "src.mcp.sql_mcp_server"]
     ports:
-      - "8002:8002"
+      - "127.0.0.1:8002:8002"
+    logging: *default-logging
     depends_on:
       postgres:
         condition: service_healthy
@@ -146,7 +161,8 @@ services:
       PYTHONPATH: /app
     command: ["streamlit", "run", "src/ui/dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
     ports:
-      - "8501:8501"
+      - "127.0.0.1:8501:8501"
+    logging: *default-logging
     depends_on:
       postgres:
         condition: service_healthy
