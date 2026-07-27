@@ -48,9 +48,13 @@ COPY --chown=marketmind:marketmind alembic/ ./alembic/
 COPY --chown=marketmind:marketmind alembic.ini ./
 COPY --chown=marketmind:marketmind pyproject.toml ./
 
-# Create data directories and streamlit config dir
-RUN mkdir -p data/raw data/processed/charts data/cache .streamlit && \
-    chown -R marketmind:marketmind data/ .streamlit
+# Create data directories, streamlit config dir, and the XDG cache dir.
+# /app is the marketmind user's home, so ~/.cache resolves to /app/.cache —
+# yfinance writes its timezone + cookie caches there. Without it being
+# writable, every call re-fetches that metadata (extra requests → avoidable
+# rate-limit exposure on long unattended runs).
+RUN mkdir -p data/raw data/processed/charts data/cache .streamlit .cache && \
+    chown -R marketmind:marketmind data/ .streamlit .cache
 
 # Create __init__ files
 RUN touch src/__init__.py src/agents/__init__.py src/quant/__init__.py \
