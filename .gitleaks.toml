@@ -12,6 +12,10 @@ paths = [
   '''\.env\.example''',
   '''README\.md''',
   '''CLAUDE\.md''',
+  # Fake secrets are this file's entire subject — it asserts that the redaction
+  # processor scrubs them. Scoped to the one file, so a real leak in any other
+  # test is still caught.
+  '''tests/unit/test_no_secret_leak\.py''',
 ]
 regexes = [
   '''your_[a-z_]+''',            # .env.example placeholders (your_bot_token…)
